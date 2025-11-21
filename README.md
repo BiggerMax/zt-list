@@ -24,7 +24,12 @@ A real-time dashboard showing A-share daily limit-up stocks, categorized by boar
    - **Framework Preset**: Next.js
    - **Build Command**: `npx @cloudflare/next-on-pages@1`
    - **Output Directory**: `.vercel/output/static` (or let Cloudflare auto-detect)
-   - *Note*: You may need to add `nodejs_compat` compatibility flag if using specific Node APIs, but this project is optimized for Edge Runtime.
+
+6. **IMPORTANT: Compatibility Flags**
+   If you see a `Node.JS Compatibility Error`, you need to enable the compatibility flag:
+   - Go to your Pages project **Settings** > **Functions** > **Compatibility Flags**.
+   - Add `nodejs_compat` to the Production and Preview compatibility flags.
+   - Redeploy your project.
 
 ### Local Development
 ```bash
