@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# A股涨停梯队 (Stock Limit-Up Dashboard)
 
-## Getting Started
+A real-time dashboard showing A-share daily limit-up stocks, categorized by board count (1st board, 2nd board, etc.).
 
-First, run the development server:
+## Features
+- **Real-time Data**: Fetches data from East Money (东方财富).
+- **Detailed Analysis**: Displays limit-up reasons and detailed concepts (e.g., "Software | AI, Cloud").
+- **Auto-Refresh**: Updates every 5 seconds.
+- **Responsive UI**: Dark mode financial terminal aesthetic.
 
+## Tech Stack
+- Next.js 15 (App Router)
+- Tailwind CSS v4
+- TypeScript
+
+## Deployment
+
+### Cloudflare Pages
+1. Push this repository to GitHub.
+2. Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com/).
+3. Go to **Workers & Pages** > **Create Application** > **Pages** > **Connect to Git**.
+4. Select this repository.
+5. **Build Settings**:
+   - **Framework Preset**: Next.js
+   - **Build Command**: `npx @cloudflare/next-on-pages@1`
+   - **Output Directory**: `.vercel/output/static` (or let Cloudflare auto-detect)
+   - *Note*: You may need to add `nodejs_compat` compatibility flag if using specific Node APIs, but this project is optimized for Edge Runtime.
+
+### Local Development
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
