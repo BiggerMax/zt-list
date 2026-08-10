@@ -211,11 +211,36 @@ async function fetchPool(
   return data.data?.pool || [];
 }
 
+// 超大单净流入缓存：前一次请求结果在 TTL 内复用，避免每 5 秒轮询反复打东财接口
+const BIG_ORDER_CACHE_TTL_MS = 30_000;
+let bigOrderCache: { key: string; map: Record<string, number>; ts: number } | null = null;
+
 async function fetchDetailedConcepts(pool: StockData[]): Promise<DetailedStock[]> {
   if (pool.length === 0) return [];
 
-  // 东财实时资金流：push2 stock/get f135(超大单流入) - f136(超大单流出) = 超大单净流入
-  // secid 格式：0.代码（深圳）、1.代码（上海）
+  // 缓存键 = 全部代码（按市场+代码排序）。涨停池有新票时键变化，触发重新拉取
+  const cacheKey = pool.map((s) => `${s.m}.${s.c}`).sort().join(',');
+  const now = Date.now();
+  if (
+    bigOrderCache &&
+    bigOrderCache.key === cacheKey &&
+    now - bigOrderCache.ts < BIG_ORDER_CACHE_TTL_MS
+  ) {
+    const map = bigOrderCache.map;
+    return pool.map((stock) => ({ ...stock, bigOrderNet: map[stock.c] ?? 0 }));
+  }
+
+  const flowMap = await fetchBigOrderFlow(pool);
+  bigOrderCache = { key: cacheKey, map: flowMap, ts: now };
+  return pool.map((stock) => ({ ...stock, bigOrderNet: flowMap[stock.c] ?? 0 }));
+}
+
+async function fetchBigOrderFlow(pool: StockData[]): Promise<Record<string, number>> {
+  // 首选：批量接口 ulist.np/get 一次取全部股票的今日超大单净流入（f66）
+  const batchMap = await fetchBigOrderBatch(pool);
+  if (Object.keys(batchMap).length > 0) return batchMap;
+
+  // 兜底：逐只查实时接口 push2 stock/get f135(超大单流入) - f136(超大单流出)
   const CONCURRENCY = 10;
   const fetchOne = async (stock: StockData): Promise<[string, number]> => {
     const secid = `${stock.m}.${stock.c}`;
@@ -262,11 +287,39 @@ async function fetchDetailedConcepts(pool: StockData[]): Promise<DetailedStock[]
     const results = await Promise.all(chunk.map(fetchOne));
     for (const [code, net] of results) flowMap[code] = net;
   }
+  return flowMap;
+}
 
-  return pool.map((stock) => ({
-    ...stock,
-    bigOrderNet: flowMap[stock.c] ?? 0,
-  }));
+/** 批量查询今日超大单净流入：ulist.np/get 一次请求多个 secid，f66 = 今日超大单净流入 */
+async function fetchBigOrderBatch(pool: StockData[]): Promise<Record<string, number>> {
+  const flowMap: Record<string, number> = {};
+  const BATCH_SIZE = 60; // 每次最多 60 只，避免 URL 过长
+  for (let i = 0; i < pool.length; i += BATCH_SIZE) {
+    const chunk = pool.slice(i, i + BATCH_SIZE);
+    const secids = chunk.map((s) => `${s.m}.${s.c}`).join(',');
+    try {
+      const url = `https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${secids}&fields=f12,f66`;
+      const res = await fetch(url, {
+        headers: {
+          'Referer': 'https://quote.eastmoney.com/',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)'
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const diff = json?.data?.diff ?? [];
+      for (const item of diff) {
+        const code = String(item?.f12 ?? '').padStart(6, '0');
+        const net = Number(item?.f66);
+        if (code && !Number.isNaN(net)) flowMap[code] = net;
+      }
+    } catch (e) {
+      console.error('Batch fund flow failed, falling back to per-stock:', e);
+      return {}; // 任何一批失败即整体退回逐只查询
+    }
+  }
+  return flowMap;
 }
 
 // ---------- 选股宝接口（上一交易日涨停队列快照） ----------
