@@ -59,6 +59,13 @@ interface LimitUpResult {
   boardHigher: ResultItem[];
 }
 
+// 页面顶部汇总：涨停数 / 跌停数 / 最高连板
+interface Summary {
+  limitUpCount: number;
+  limitDownCount: number | null; // 跌停池接口失败时为 null，前端显示 —
+  maxBoardCount: number;
+}
+
 // 开盘啦通用认证参数
 const KPL_COMMON =
   'DeviceID=29a7602a14606c2577c246c577c6c83cee163dab&PhoneOSNew=2' +
@@ -109,7 +116,30 @@ export async function GET() {
     detailedStocks.forEach((stock) => addToResult(result, stock));
     broken.forEach((stock) => addBrokenToResult(result, stock, quotes));
 
-    return NextResponse.json(result);
+    // 6. 页面顶部汇总：涨停数 / 跌停数 / 最高连板（断板股不计入）
+    const allLimitUp = [
+      ...result.board1,
+      ...result.board2,
+      ...result.board3,
+      ...result.board4,
+      ...result.boardHigher,
+    ].filter((s) => !s.isZhaBan);
+
+    let limitDownCount: number | null = null;
+    try {
+      const dtPool = await fetchPool('getTopicDTPool', eastDateStr);
+      limitDownCount = dtPool.length;
+    } catch (e) {
+      console.error('Failed to fetch limit-down pool', e);
+    }
+
+    const summary: Summary = {
+      limitUpCount: allLimitUp.length,
+      limitDownCount,
+      maxBoardCount: allLimitUp.reduce((m, s) => Math.max(m, s.limitCount), 0),
+    };
+
+    return NextResponse.json({ ...result, summary });
   } catch (error) {
     console.error('Error fetching limit up data:', error);
     return NextResponse.json({ error: 'Failed to fetch data' }, { status: 500 });
@@ -189,7 +219,7 @@ function pushByLevel(result: LimitUpResult, item: ResultItem, level: number) {
 // ---------- 东财接口 ----------
 
 async function fetchPool(
-  topic: 'getTopicZTPool',
+  topic: 'getTopicZTPool' | 'getTopicDTPool',
   dateStr: string
 ): Promise<StockData[]> {
   const apiUrl = `https://push2ex.eastmoney.com/${topic}?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt&Pageindex=0&pagesize=1000&sort=fbt:asc&date=${dateStr}`;

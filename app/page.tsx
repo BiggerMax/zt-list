@@ -27,6 +27,12 @@ interface BoardData {
   boardHigher: Stock[];
 }
 
+interface Summary {
+  limitUpCount: number;
+  limitDownCount: number | null;
+  maxBoardCount: number;
+}
+
 export default function Home() {
   const [data, setData] = useState<BoardData>({
     board1: [],
@@ -39,6 +45,7 @@ export default function Home() {
   const [lastUpdated, setLastUpdated] = useState<string>('');
   const [sortBy, setSortBy] = useState<'time' | 'amount'>('time');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [summary, setSummary] = useState<Summary | null>(null);
 
   const fetchData = async () => {
     try {
@@ -46,6 +53,7 @@ export default function Home() {
       if (!res.ok) throw new Error('Failed to fetch');
       const jsonData = await res.json();
       setData(jsonData);
+      setSummary(jsonData.summary ?? null);
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (error) {
       console.error(error);
@@ -126,8 +134,34 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="text-xs text-[#666] font-mono">
-          {loading ? 'Loading...' : `Last updated: ${lastUpdated}`}
+        {/* Summary stats (左侧) + Last updated (右侧) */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4">
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-xs text-[#888]">涨停</span>
+              <span className="text-base font-bold text-[#ff4d4f] font-mono leading-none">
+                {summary ? summary.limitUpCount : '—'}
+              </span>
+            </span>
+            <span className="w-px h-4 bg-[#444]" />
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-xs text-[#888]">跌停</span>
+              <span className="text-base font-bold text-[#3ecf7a] font-mono leading-none">
+                {summary ? (summary.limitDownCount ?? '—') : '—'}
+              </span>
+            </span>
+            <span className="w-px h-4 bg-[#444]" />
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-xs text-[#888]">最高连板</span>
+              <span className="text-base font-bold text-[#e8b64c] font-mono leading-none">
+                {summary ? `${summary.maxBoardCount}板` : '—'}
+              </span>
+            </span>
+          </div>
+          <span className="w-px h-5 bg-[#333]" />
+          <div className="text-xs text-[#666] font-mono">
+            {loading ? 'Loading...' : `Last updated: ${lastUpdated}`}
+          </div>
         </div>
       </header>
 
