@@ -214,26 +214,43 @@ async function fetchPool(
 async function fetchDetailedConcepts(pool: StockData[]): Promise<DetailedStock[]> {
   if (pool.length === 0) return [];
 
-  // 东财历史资金流（push2his 可靠）：daykline 最后一条 = 最近交易日超大单净流入
+  // 东财实时资金流：push2 stock/get f135(超大单流入) - f136(超大单流出) = 超大单净流入
   // secid 格式：0.代码（深圳）、1.代码（上海）
-  const CONCURRENCY = 15;
+  const CONCURRENCY = 10;
   const fetchOne = async (stock: StockData): Promise<[string, number]> => {
     const secid = `${stock.m}.${stock.c}`;
-    const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=1&klt=101&secid=${secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f56`;
     try {
+      const url = `https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f135,f136`;
       const res = await fetch(url, {
         headers: {
           'Referer': 'https://quote.eastmoney.com/',
           'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)'
         },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const d = json?.data;
+      if (d && (d.f135 != null || d.f136 != null)) {
+        return [stock.c, (Number(d.f135) || 0) - (Number(d.f136) || 0)];
+      }
+    } catch {
+      /* 实时接口失败，走日线兜底 */
+    }
+    // 兜底：历史日线超大单净流入（f56），盘后返回当日数据
+    try {
+      const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=1&klt=101&secid=${secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f56`;
+      const res = await fetch(url, {
+        headers: {
+          'Referer': 'https://quote.eastmoney.com/',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)'
+        },
+        signal: AbortSignal.timeout(5000),
       });
       const json = await res.json();
-      // klines 格式："date,主力净流入,超大单净流入"
       const last = json.data?.klines?.slice(-1)?.[0] ?? '';
       const parts = last.split(',');
-      const bigOrderNet = Number(parts[2]) || 0; // f56 = 超大单净流入
-      return [stock.c, bigOrderNet];
+      return [stock.c, Number(parts[2]) || 0];
     } catch {
       return [stock.c, 0];
     }

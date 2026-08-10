@@ -72,8 +72,8 @@ const StockCard: React.FC<StockCardProps> = ({
                         <span className={`text-[#ff4d4f] transition-all ${highlight === 'amount' ? 'font-bold' : 'font-medium'}`}>
                             {amount}
                         </span>
-                        <span className={`text-[11px] mt-0.5 ${bigOrderPositive ? 'text-[#ff4d4f]' : 'text-[#3ecf7a]'}`}>
-                            特大单 {bigOrderNet > 0 ? `+${bigOrderNetText}` : bigOrderNetText}
+                        <span className={`text-[11px] mt-0.5 ${bigOrderNet > 0 ? 'text-[#ff4d4f]' : bigOrderNet < 0 ? 'text-[#3ecf7a]' : 'text-[#666]'}`}>
+                            特大单 {bigOrderNet > 0 ? `+${bigOrderNetText}` : bigOrderNet < 0 ? bigOrderNetText : '—'}
                         </span>
                     </div>
                 )}
