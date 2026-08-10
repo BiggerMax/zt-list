@@ -1,0 +1,33 @@
+# 核心依赖
+requests>=2.31.0
+aiohttp>=3.9.0
+httpx>=0.25.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Tushare API（可选，需要Token）
+tushare>=1.2.89
+
+# 数据存储
+openpyxl>=3.1.0
+
+# 命令行工具
+click>=8.1.0
+rich>=13.0.0
+
+# 日志
+loguru>=0.7.0
+
+# 定时任务
+schedule>=1.2.0
+
+# 配置管理
+python-dotenv>=1.0.0
+
+# 进度条
+tqdm>=4.66.0
+
+# 数据验证
+pydantic>=2.0.0

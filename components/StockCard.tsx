@@ -6,19 +6,45 @@ interface StockCardProps {
     reason: string;
     detailedReason?: string;
     amount: string;
-    changePercent: number;
+    bigOrderNet: number;
+    bigOrderNetText: string;
+    isZhaBan?: boolean;       // 断板：上一交易日涨停、今日未涨停
+    currentChange?: number;   // 断板股当前实时涨幅（%）
+    highlight?: 'time' | 'amount';
 }
 
-const StockCard: React.FC<StockCardProps> = ({ name, time, reason, detailedReason, amount, changePercent }) => {
+const StockCard: React.FC<StockCardProps> = ({
+    name,
+    time,
+    reason,
+    detailedReason,
+    amount,
+    bigOrderNet,
+    bigOrderNetText,
+    isZhaBan = false,
+    currentChange,
+    highlight,
+}) => {
+    // 超大单净流入：正值（流入）红色、负值/零（流出）绿色
+    const bigOrderPositive = bigOrderNet > 0;
+
     return (
-        <div className="bg-[#252525] border border-[#333] p-3 rounded hover:bg-[#2a2a2a] transition-colors cursor-pointer mb-2 group relative">
+        <div
+            className={`p-3 rounded mb-2 group relative transition-colors cursor-pointer ${
+                isZhaBan
+                    ? 'bg-[#1f2a22] border border-dashed border-[#3d5a44] hover:bg-[#26352b]'
+                    : 'bg-[#332222] border border-[#4d3030] hover:bg-[#3d2929]'
+            }`}
+        >
             <div className="flex justify-between items-center mb-1">
-                <span className="text-base font-bold text-[#e0e0e0]">{name}</span>
-                <span className="text-xs text-[#888] font-mono">{time}</span>
+                <span className={`text-base font-bold ${isZhaBan ? 'text-[#9a9a9a]' : 'text-[#e0e0e0]'}`}>{name}</span>
+                <span className={`text-xs font-mono transition-colors ${highlight === 'time' ? 'text-red-400 font-bold' : 'text-[#888]'}`}>
+                    {time}
+                </span>
             </div>
 
-            <div className="flex justify-between items-center text-xs">
-                <div className="flex flex-col max-w-[65%]">
+            <div className="flex justify-between items-start text-xs">
+                <div className="flex flex-col max-w-[62%]">
                     <span className="text-[#e5e5e5] font-medium truncate" title={reason}>
                         {reason}
                     </span>
@@ -28,9 +54,29 @@ const StockCard: React.FC<StockCardProps> = ({ name, time, reason, detailedReaso
                         </span>
                     )}
                 </div>
-                <span className="text-[#ff4d4f] font-medium whitespace-nowrap ml-2">
-                    {amount}
-                </span>
+
+                {isZhaBan ? (
+                    <div className="flex flex-col items-end ml-2 whitespace-nowrap shrink-0">
+                        {currentChange != null ? (
+                            <span className={`text-sm font-bold ${currentChange >= 0 ? 'text-[#ff4d4f]' : 'text-[#3ecf7a]'}`}>
+                                {currentChange >= 0 ? '+' : ''}
+                                {currentChange.toFixed(2)}%
+                            </span>
+                        ) : (
+                            <span className="text-[10px] text-[#888]">未涨停</span>
+                        )}
+                        <span className="text-[10px] text-[#a08b3c] mt-0.5">昨涨停</span>
+                    </div>
+                ) : (
+                    <div className="flex flex-col items-end ml-2 whitespace-nowrap shrink-0">
+                        <span className={`text-[#ff4d4f] transition-all ${highlight === 'amount' ? 'font-bold' : 'font-medium'}`}>
+                            {amount}
+                        </span>
+                        <span className={`text-[11px] mt-0.5 ${bigOrderPositive ? 'text-[#ff4d4f]' : 'text-[#3ecf7a]'}`}>
+                            特大单 {bigOrderNet > 0 ? `+${bigOrderNetText}` : bigOrderNetText}
+                        </span>
+                    </div>
+                )}
             </div>
 
             {/* Tooltip for full detailed reason */}
