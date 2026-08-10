@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-export const runtime = 'edge'; // Use Edge Runtime for Cloudflare
+// OpenNext 部署到 Cloudflare Workers（nodejs_compat），无需 edge runtime
 export const dynamic = 'force-dynamic'; // Disable caching
 
 // 东财涨停池数据结构
