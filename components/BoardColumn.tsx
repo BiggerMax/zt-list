@@ -11,7 +11,11 @@ interface Stock {
     isZhaBan: boolean;
     bigOrderNet: number;
     bigOrderNetText: string;
+    turnoverText?: string;
+    ltszText?: string;
+    turnoverRate?: number;
     currentChange?: number;
+    overHigh350?: boolean;
 }
 
 interface BoardColumnProps {
@@ -21,9 +25,13 @@ interface BoardColumnProps {
     sortBy?: 'time' | 'amount';
     /** 由父级控制列的弹性宽度（如 min-w 用于窄屏横向滚动） */
     className?: string;
+    /** 点击个股卡片（打开分时/K线弹窗） */
+    onSelect?: (code: string, name: string) => void;
+    /** 需要高亮的个股代码（从K线双击跳转而来） */
+    highlightCode?: string | null;
 }
 
-const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortBy, className }) => {
+const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortBy, className, onSelect, highlightCode }) => {
     return (
         <div
             className={`flex flex-col h-full min-h-0 bg-surface2 border-r border-line last:border-r-0 ${className ?? ''}`}
@@ -51,8 +59,14 @@ const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortB
                         amount={stock.amount}
                         bigOrderNet={stock.bigOrderNet}
                         bigOrderNetText={stock.bigOrderNetText}
+                        turnoverText={stock.turnoverText}
+                        ltszText={stock.ltszText}
+                        turnoverRate={stock.turnoverRate}
                         currentChange={stock.currentChange}
+                        overHigh350={stock.overHigh350}
                         highlight={sortBy}
+                        isHighlighted={highlightCode === stock.code}
+                        onClick={onSelect ? () => onSelect(stock.code, stock.name) : undefined}
                     />
                 ))}
 
@@ -76,9 +90,15 @@ const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortB
                                 amount={stock.amount}
                                 bigOrderNet={stock.bigOrderNet}
                                 bigOrderNetText={stock.bigOrderNetText}
+                                turnoverText={stock.turnoverText}
+                                ltszText={stock.ltszText}
+                                turnoverRate={stock.turnoverRate}
                                 currentChange={stock.currentChange}
+                                overHigh350={stock.overHigh350}
                                 isZhaBan
                                 highlight={sortBy}
+                                isHighlighted={highlightCode === stock.code}
+                                onClick={onSelect ? () => onSelect(stock.code, stock.name) : undefined}
                             />
                         ))}
                     </>

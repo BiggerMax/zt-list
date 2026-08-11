@@ -82,6 +82,19 @@ function shouldPersist(dateStr: string, result: LimitUpResult): boolean {
   return false;
 }
 
+// 收盘后强制落盘标记：每个交易日只强制一次，确保当日快照包含完整富文本涨停原因
+let forcedClosePersist: string | null = null;
+
+/** Asia/Shanghai 是否已收盘（15:05 后视为收盘，预留选股宝快照落地时间） */
+function isAfterClose(): boolean {
+  const n = cnNow();
+  return n.getHours() > 15 || (n.getHours() === 15 && n.getMinutes() >= 5);
+}
+
+// 今日结果缓存：多个客户端轮询在 TTL 内共享一次构建，显著降低上游接口压力
+const TODAY_RESULT_CACHE_TTL_MS = 15_000;
+let todayResultCache: { date: string; ts: number; body: LimitUpResult } | null = null;
+
 // ---------- 数据模型 ----------
 
 // 东财涨停池数据结构
@@ -94,12 +107,16 @@ interface StockData {
   lbc?: number; // Limit board count (limit-up pool)
   fbt: number; // First board time (HHMMSS)
   fund?: number; // Sealed fund
+  amount?: number; // 成交额（元）
+  ltsz?: number; // 流通市值（元）
+  hs?: number; // 换手率（%）
   hybk: string; // Industry/Reason
 }
 
 interface DetailedStock extends StockData {
   detailedReason?: string;
   bigOrderNet: number; // 超大单净流入（元），东财 f135 - f136
+  overHigh350?: boolean; // 当日价突破前 350 日最高价（前复权）
 }
 
 // 选股宝（上一交易日涨停队列快照）
@@ -115,6 +132,24 @@ interface XGBStock {
   };
 }
 
+/** 选股宝涨停原因映射：code → 原因文本（优先富文本，缺省用关联板块拼装） */
+function xgbReasonMap(rows: XGBStock[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of rows) {
+    const code = r.symbol.split('.')[0];
+    if (!code) continue;
+    const sr = r.surge_reason;
+    const reason =
+      sr?.stock_reason?.trim() ||
+      (sr?.related_plates ?? [])
+        .map((p) => p.plate_name)
+        .filter(Boolean)
+        .join(';');
+    if (reason) out[code] = reason;
+  }
+  return out;
+}
+
 interface ResultItem {
   code: string;
   name: string;
@@ -125,11 +160,15 @@ interface ResultItem {
   detailedReason?: string;
   amount: string;
   fund: number;
+  turnoverText: string; // 成交额（格式化，如 2.45亿）
+  ltszText: string; // 流通值（格式化，如 36.99亿）
+  turnoverRate?: number; // 换手率（%）
   limitCount: number;
   isZhaBan: boolean; // 断板：上一交易日涨停、今日未涨停
   bigOrderNet: number; // 超大单净流入（元）
   bigOrderNetText: string; // 格式化后的超大单净流入
   currentChange?: number; // 断板股当日涨幅（%）：实时模式为实时涨幅，历史模式为收盘涨幅
+  overHigh350?: boolean; // 当日价突破前 350 日最高价（前复权）→ 前端显示"新高"关注标记
 }
 
 interface LimitUpResult {
@@ -154,6 +193,8 @@ const KPL_COMMON =
   '&Token=34eba58a769e04ca9df75b85557a76d6&UserID=4565300' +
   '&VerSion=5.23.0.1&apiv=w44';
 const KPL_UA = 'lhb/5.23.1 (com.kaipanla.www; build:1; iOS 26.2.0)';
+// 东财行情接口 token（与 stock-chart 路由同一来源，部分接口必需）
+const EM_UT = '7eea3edcaed734bea9cbfc24409ed989';
 
 // ---------- 主入口 ----------
 
@@ -182,20 +223,86 @@ export async function GET(request: Request) {
       const cached = await kv?.get(key);
       if (cached) {
         try {
-          return NextResponse.json({ ...JSON.parse(cached), cached: true, today: todayStr });
+          const snap = JSON.parse(cached);
+          // 补齐涨停原因：盘中写入的快照可能只有概念标签，用选股宝当日详情升级为富文本
+          try {
+            const xgb = await fetchXGBDetail(dateStr);
+            const map = xgbReasonMap(xgb);
+            if (Object.keys(map).length > 0) {
+              for (const bk of ['board1', 'board2', 'board3', 'board4', 'boardHigher'] as const) {
+                const arr = snap[bk] as ResultItem[] | undefined;
+                if (!Array.isArray(arr)) continue;
+                for (const item of arr) {
+                  if (!item || item.isZhaBan) continue; // 断板股原因来自前一交易日，跳过
+                  const r = map[item.code];
+                  if (r) item.detailedReason = r;
+                }
+              }
+            }
+          } catch {
+            /* 选股宝不可用时保留快照原数据 */
+          }
+          // 补齐 overHigh350：旧快照（首次写入早于该字段上线）需现场计算"突破前 350 日高"标记。
+          // 5 分钟缓存命中后近乎零成本；拉取失败则保留快照原数据（不标记）。
+          try {
+            const BOARD_KEYS = ['board1', 'board2', 'board3', 'board4', 'boardHigher'] as const;
+            const limitUpCodes: string[] = [];
+            for (const bk of BOARD_KEYS) {
+              const arr = snap[bk] as ResultItem[] | undefined;
+              if (!Array.isArray(arr)) continue;
+              for (const item of arr) {
+                if (!item || item.isZhaBan) continue; // 断板股不标记
+                if (item.code) limitUpCodes.push(item.code);
+              }
+            }
+            if (limitUpCodes.length > 0) {
+              const highMap = await fetchHigh350Map(limitUpCodes, dateStr);
+              for (const bk of BOARD_KEYS) {
+                const arr = snap[bk] as ResultItem[] | undefined;
+                if (!Array.isArray(arr)) continue;
+                for (const item of arr) {
+                  if (!item || item.isZhaBan) continue;
+                  const h = highMap[item.code];
+                  item.overHigh350 =
+                    h != null && typeof item.price === 'number' && item.price > h ? true : undefined;
+                }
+              }
+            }
+          } catch {
+            /* 350 日高拉取失败保留快照原数据 */
+          }
+          return NextResponse.json({ ...snap, cached: true, today: todayStr });
         } catch {
           /* 快照损坏则忽略，重新拉取 */
         }
       }
     }
 
-    const body = isToday ? await buildTodayResult() : await buildHistoricalResult(dateStr);
+    // 今日：TTL 内复用构建结果（前端 10s 轮询 + 服务端 15s 缓存，多客户端错峰共享一次构建）
+    let body: LimitUpResult;
+    if (isToday) {
+      const now = Date.now();
+      if (
+        todayResultCache &&
+        todayResultCache.date === dateStr &&
+        now - todayResultCache.ts < TODAY_RESULT_CACHE_TTL_MS
+      ) {
+        body = todayResultCache.body;
+      } else {
+        body = await buildTodayResult();
+        todayResultCache = { date: dateStr, ts: now, body };
+      }
+    } else {
+      body = await buildHistoricalResult(dateStr);
+    }
 
-    // 持久化快照（今日实时数据也会按节流规则落盘，收盘后即为当日最终数据）
+    // 持久化快照（今日实时数据按节流规则落盘；收盘后强制落盘一次，确保快照含完整富文本原因）
     if (body && kv) {
       try {
-        if (shouldPersist(dateStr, body)) {
+        const forceClose = isToday && isAfterClose() && forcedClosePersist !== dateStr;
+        if (forceClose || shouldPersist(dateStr, body)) {
           await kv.put(key, JSON.stringify(body));
+          if (forceClose) forcedClosePersist = dateStr;
         }
       } catch (e) {
         console.error('Failed to persist snapshot', e);
@@ -230,24 +337,49 @@ async function buildTodayResult(): Promise<LimitUpResult> {
   // 1. 今日涨停池（东财，实时）—— 涨停梯队数据源
   const pool = await fetchPool('getTopicZTPool', eastDateStr);
   const todayCodes = new Set(pool.map((s) => s.c));
-  const detailedStocks = await fetchDetailedConcepts(pool);
 
   // 2. 上一交易日涨停队列（选股宝快照）—— 用于找出今日未涨停（断板）个股
   const prevDate = await findPrevSnapshotDate(today);
   const prevPool = prevDate ? await fetchXGBDetail(prevDate) : [];
 
-  // 3. 断板股 = 上一交易日涨停、今日不在涨停池
+  // 3. 今日涨停池详情（超大单净流入 + 概念标签兜底）+ 前 350 日最高价（并行拉取，降低整体延迟）
+  const todayStr = toDateStr(today);
+  const [detailedStocksRaw, high350Map] = await Promise.all([
+    fetchDetailedConcepts(pool),
+    fetchHigh350Map(pool.map((s) => s.c), todayStr),
+  ]);
+  // 当日价（东财返回的最新价/收盘价，非前复权）突破前 350 日最高价（前复权）→ 标记
+  // 对无近期除权的股票，复权与否一致；有除权时略有偏差，可接受
+  const detailedStocks = detailedStocksRaw.map((s) => ({
+    ...s,
+    overHigh350: high350Map[s.c] != null ? s.p / 1000 > high350Map[s.c]! : false,
+  }));
+
+  // 4. 涨停原因：选股宝富文本优先（当日快照 → 上一交易日连板延续 → 概念标签兜底）
+  try {
+    const todayXgb = await fetchXGBDetail(todayStr);
+    const todayMap = xgbReasonMap(todayXgb);
+    const prevMap = xgbReasonMap(prevPool);
+    for (const s of detailedStocks) {
+      const r = todayMap[s.c] ?? prevMap[s.c];
+      if (r) s.detailedReason = r;
+    }
+  } catch {
+    /* 选股宝失败则保留概念标签 */
+  }
+
+  // 5. 断板股 = 上一交易日涨停、今日不在涨停池
   const broken = prevPool.filter((s) => {
     const code = s.symbol.split('.')[0];
     return !todayCodes.has(code);
   });
 
-  // 4. 断板股当前实时涨幅（开盘啦批量行情）
+  // 6. 断板股当前实时涨幅（开盘啦批量行情）
   const quotes = broken.length
     ? await fetchKPLQuotes(broken.map((s) => s.symbol.split('.')[0]))
     : {};
 
-  // 5. 汇总（断板股不计入）
+  // 7. 汇总（断板股不计入）
   const summary = await buildSummary(eastDateStr, detailedStocks);
 
   return assembleResult(detailedStocks, broken, quotes, summary);
@@ -262,11 +394,19 @@ async function buildHistoricalResult(dateStr: string): Promise<LimitUpResult> {
   const pool = await fetchPool('getTopicZTPool', eastDateStr);
   const todayCodes = new Set(pool.map((s) => s.c));
 
-  // 2. 当日超大单净流入（历史日线，匹配到目标日期）
-  const flowMap = await fetchHistoricalBigOrder(pool, dateStr);
+  // 2. 当日超大单净流入 + 涨停原因（选股宝当日详情优先，概念标签兜底）+ 前 350 日最高价（并行）
+  const [flowMap, xgbRows, conceptMap, high350Map] = await Promise.all([
+    fetchHistoricalBigOrder(pool, dateStr),
+    fetchXGBDetail(dateStr),
+    fetchConcepts(pool),
+    fetchHigh350Map(pool.map((s) => s.c), dateStr),
+  ]);
+  const reasonMap = xgbReasonMap(xgbRows);
   const detailedStocks = pool.map((stock) => ({
     ...stock,
     bigOrderNet: flowMap[stock.c] ?? 0,
+    detailedReason: reasonMap[stock.c] ?? conceptMap[stock.c] ?? '',
+    overHigh350: high350Map[stock.c] != null ? stock.p / 1000 > high350Map[stock.c]! : false,
   }));
 
   // 3. 上一交易日涨停队列（选股宝快照）—— 断板股 = 昨涨停、当日未涨停
@@ -285,6 +425,10 @@ async function buildHistoricalResult(dateStr: string): Promise<LimitUpResult> {
   return assembleResult(detailedStocks, broken, quotes, summary);
 }
 
+// 跌停池计数缓存（60s，无需每次构建都拉取）
+const DT_POOL_CACHE_TTL_MS = 60_000;
+let dtPoolCache: { eastDateStr: string; count: number; ts: number } | null = null;
+
 async function buildSummary(
   eastDateStr: string,
   detailedStocks: DetailedStock[]
@@ -293,8 +437,14 @@ async function buildSummary(
 
   let limitDownCount: number | null = null;
   try {
-    const dtPool = await fetchPool('getTopicDTPool', eastDateStr);
-    limitDownCount = dtPool.length;
+    const now = Date.now();
+    if (dtPoolCache && dtPoolCache.eastDateStr === eastDateStr && now - dtPoolCache.ts < DT_POOL_CACHE_TTL_MS) {
+      limitDownCount = dtPoolCache.count;
+    } else {
+      const dtPool = await fetchPool('getTopicDTPool', eastDateStr);
+      limitDownCount = dtPool.length;
+      dtPoolCache = { eastDateStr, count: limitDownCount, ts: now };
+    }
   } catch (e) {
     console.error('Failed to fetch limit-down pool', e);
   }
@@ -339,10 +489,14 @@ function addToResult(result: LimitUpResult, stock: DetailedStock) {
     detailedReason: stock.detailedReason,
     amount: formatAmount(stock.fund ?? 0),
     fund: stock.fund ?? 0,
+    turnoverText: formatAmount(stock.amount ?? 0),
+    ltszText: formatAmount(stock.ltsz ?? 0),
+    turnoverRate: stock.hs ?? undefined,
     limitCount,
     isZhaBan: false,
     bigOrderNet: stock.bigOrderNet,
     bigOrderNetText: formatAmount(stock.bigOrderNet),
+    overHigh350: stock.overHigh350 === true ? true : undefined,
   };
 
   pushByLevel(result, item, limitCount);
@@ -377,6 +531,9 @@ function addBrokenToResult(
     detailedReason: stock.surge_reason?.stock_reason || '',
     amount: '',
     fund: 0,
+    turnoverText: '',
+    ltszText: '',
+    turnoverRate: undefined,
     limitCount,
     isZhaBan: true,
     bigOrderNet: 0,
@@ -420,9 +577,12 @@ async function fetchPool(
   return data.data?.pool || [];
 }
 
-// 超大单净流入缓存：前一次请求结果在 TTL 内复用，避免每 5 秒轮询反复打东财接口
+// 超大单净流入缓存（盘中实时变动，30s）
 const BIG_ORDER_CACHE_TTL_MS = 30_000;
 let bigOrderCache: { key: string; map: Record<string, number>; ts: number } | null = null;
+// 概念题材为静态数据，缓存 10 分钟，避免每次构建都逐只打东财
+const CONCEPT_CACHE_TTL_MS = 600_000;
+let conceptCache: { key: string; concepts: Record<string, string>; ts: number } | null = null;
 
 async function fetchDetailedConcepts(pool: StockData[]): Promise<DetailedStock[]> {
   if (pool.length === 0) return [];
@@ -436,12 +596,69 @@ async function fetchDetailedConcepts(pool: StockData[]): Promise<DetailedStock[]
     now - bigOrderCache.ts < BIG_ORDER_CACHE_TTL_MS
   ) {
     const map = bigOrderCache.map;
-    return pool.map((stock) => ({ ...stock, bigOrderNet: map[stock.c] ?? 0 }));
+    const concepts = conceptCache?.key === cacheKey ? conceptCache.concepts : {};
+    return pool.map((stock) => ({
+      ...stock,
+      bigOrderNet: map[stock.c] ?? 0,
+      detailedReason: concepts[stock.c] ?? '',
+    }));
   }
 
-  const flowMap = await fetchBigOrderFlow(pool);
+  const [flowMap, conceptMap] = await Promise.all([fetchBigOrderFlow(pool), fetchConceptsCached(pool)]);
   bigOrderCache = { key: cacheKey, map: flowMap, ts: now };
-  return pool.map((stock) => ({ ...stock, bigOrderNet: flowMap[stock.c] ?? 0 }));
+  return pool.map((stock) => ({
+    ...stock,
+    bigOrderNet: flowMap[stock.c] ?? 0,
+    detailedReason: conceptMap[stock.c] ?? '',
+  }));
+}
+
+/** fetchConcepts 的带缓存版本：概念为静态数据，长 TTL 复用 */
+async function fetchConceptsCached(pool: StockData[]): Promise<Record<string, string>> {
+  const cacheKey = pool.map((s) => `${s.m}.${s.c}`).sort().join(',');
+  const now = Date.now();
+  if (conceptCache && conceptCache.key === cacheKey && now - conceptCache.ts < CONCEPT_CACHE_TTL_MS) {
+    return conceptCache.concepts;
+  }
+  const concepts = await fetchConcepts(pool);
+  conceptCache = { key: cacheKey, concepts, ts: now };
+  return concepts;
+}
+
+/** 逐只拉取东财概念题材（f129，如 "黄金概念,移动支付,…"）作为涨停原因详情 */
+async function fetchConcepts(pool: StockData[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const CONCURRENCY = 10;
+  // 概念题材是静态数据：先用 push2delay 镜像（连通性更稳），失败再回退主站 push2
+  const HOSTS = ['push2delay.eastmoney.com', 'push2.eastmoney.com'];
+  const fetchOne = async (stock: StockData): Promise<[string, string]> => {
+    const secid = `${stock.m}.${stock.c}`;
+    const headers = {
+      'Referer': 'https://quote.eastmoney.com/',
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+    };
+    for (const host of HOSTS) {
+      const url = `https://${host}/api/qt/stock/get?secid=${secid}&fields=f57,f58,f129`;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = await res.json();
+          return [stock.c, String(json?.data?.f129 ?? '')];
+        } catch {
+          if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    }
+    return [stock.c, '']; // 全部失败留空，不阻塞整板
+  };
+
+  for (let i = 0; i < pool.length; i += CONCURRENCY) {
+    const chunk = pool.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(fetchOne));
+    for (const [code, v] of results) out[code] = v;
+  }
+  return out;
 }
 
 async function fetchBigOrderFlow(pool: StockData[]): Promise<Record<string, number>> {
@@ -668,6 +885,104 @@ async function fetchHistoricalChangePct(
     for (const [code, v] of results) if (!Number.isNaN(v)) out[code] = v;
   }
   return out;
+}
+
+// ---------- 前 350 日最高价（"突破 350 日高"关注标记） ----------
+
+// 前 350 日高对固定日期不变：实时模式当日盘前固定、历史模式永久固定。
+// 缓存键含日期与股票集合，TTL 内复用，避免 10s 轮询重复打东财。
+const HIGH350_CACHE_TTL_MS = 300_000;
+let high350Cache: { key: string; map: Record<string, number>; ts: number } | null = null;
+
+/**
+ * 批量获取股票的"前 350 日最高价"（不含当日、前复权）。
+ * 返回 {code: high350}；拉取失败或数据不足 2 根的不入 map（前端按缺省=不标记处理）。
+ * 并发 20 + 5 分钟缓存，与 fetchDetailedConcepts / fetchConcepts 并行执行以降低整体延迟。
+ */
+async function fetchHigh350Map(codes: string[], dateStr: string): Promise<Record<string, number>> {
+  if (codes.length === 0) return {};
+  const sorted = [...codes].sort();
+  const cacheKey = `${dateStr}:${sorted.join(',')}`;
+  const now = Date.now();
+  if (high350Cache && high350Cache.key === cacheKey && now - high350Cache.ts < HIGH350_CACHE_TTL_MS) {
+    return high350Cache.map;
+  }
+
+  const CONCURRENCY = 20;
+  const map: Record<string, number> = {};
+
+  /** 前 350 日最高价：rows 为 {date, high} 升序列表，末根为目标日（当日），去掉后取剩余最高 */
+  const high350Of = (rows: { date: string; high: number }[]): number | null => {
+    const slice = rows.slice(Math.max(0, rows.length - 351), rows.length - 1);
+    if (slice.length === 0) return null; // 至少需要 1 根历史 + 当日
+    let mx = -Infinity;
+    for (const r of slice) if (r.high > mx) mx = r.high;
+    return mx > -Infinity ? mx : null;
+  };
+
+  const fetchOne = async (code: string): Promise<[string, number | null]> => {
+    const secid = secidOf(code);
+    // 首选：东财前复权日K（拉 351 根，只需 date(f51)+high(f54)，减小 payload）
+    try {
+      const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=1&lmt=351&end=${dateStr.replace(/-/g, '')}&fields1=f1,f2,f3&fields2=f51,f54`;
+      const res = await fetch(url, {
+        headers: {
+          Referer: 'https://quote.eastmoney.com/',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        },
+        signal: AbortSignal.timeout(6000),
+        next: { revalidate: 0 },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const klines: string[] = json?.data?.klines ?? [];
+        if (klines.length >= 2) {
+          const h = high350Of(klines.map((k) => {
+            const p = k.split(',');
+            return { date: p[0], high: Number(p[1]) };
+          }));
+          if (h != null) return [code, h];
+        }
+      }
+    } catch {
+      /* 东财失败 → 腾讯 */
+    }
+    // 备用：腾讯前复权日K（qfqday = [date, open, close, high, low, vol]）。
+    // 腾讯只返回最新一段K线，历史日期需先截断到目标日（含），再同样去掉当日取前 350 日最高。
+    try {
+      const tx = /^(60|68)/.test(code) ? `sh${code}` : `sz${code}`;
+      const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tx},day,,,401,qfq`;
+      const res = await fetch(url, {
+        headers: {
+          Referer: 'https://gu.qq.com/',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+        },
+        signal: AbortSignal.timeout(6000),
+        next: { revalidate: 0 },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const rows: string[][] = json?.data?.[tx]?.['qfqday'] ?? [];
+        const filtered = rows.filter((r) => r[0] <= dateStr);
+        if (filtered.length >= 2) {
+          const h = high350Of(filtered.map((r) => ({ date: r[0], high: Number(r[3]) })));
+          if (h != null) return [code, h];
+        }
+      }
+    } catch {
+      /* 双源均失败 → 不标记（不阻塞整板） */
+    }
+    return [code, null];
+  };
+
+  for (let i = 0; i < codes.length; i += CONCURRENCY) {
+    const chunk = codes.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(fetchOne));
+    for (const [code, h] of results) if (h != null) map[code] = h;
+  }
+
+  high350Cache = { key: cacheKey, map, ts: now };
+  return map;
 }
 
 /** 由 6 位代码推断东财 secid 市场前缀（60/68 开头 → 上交所，其余 → 深交所） */
