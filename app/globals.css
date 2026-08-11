@@ -1,37 +1,163 @@
 @import "tailwindcss";
 
+/* 类名驱动的深色模式：.dark 挂在 <html> 上（由 layout 中的内联脚本 + 页面切换按钮控制） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------- 主题变量 ---------- */
 :root {
-  --foreground-rgb: 255, 255, 255;
-  --background-start-rgb: 20, 20, 20;
-  --background-end-rgb: 10, 10, 10;
+  color-scheme: light;
+
+  /* 背景层级 */
+  --bg-canvas: #f3f4f6;
+  --bg-surface: #ffffff;
+  --bg-surface2: #fbfbfc;
+  --bg-inset: #eceef1;
+  --bg-inset-hover: #e2e5ea;
+  --bg-badge: #e9ebef;
+
+  /* 卡片 */
+  --bg-card-up: #fff1f0;
+  --bg-card-up-hover: #ffe9e7;
+  --bg-card-zb: #f0f7f2;
+  --bg-card-zb-hover: #e7f2ea;
+
+  /* 边框 */
+  --border-line: #e2e5ea;
+  --border-line2: #c9ced6;
+  --border-card-up: #f3c6c3;
+  --border-card-zb: #c3dccb;
+
+  /* 文本 */
+  --text-ink: #1f2329;
+  --text-ink2: #5b6470;
+  --text-ink3: #949aa4;
+  --text-khaki: #8a6b1f;
+
+  /* 提示浮层 */
+  --tip-bg: #ffffff;
+  --tip-border: #d5dae1;
+  --tip-text: #3f4650;
+  --tip-title: #1f2329;
+
+  /* 横幅 */
+  --banner-warn-bg: #fbf4e4;
+  --banner-warn-border: #e7d7a8;
+  --banner-warn-text: #9a7424;
+  --banner-err-bg: #fdeeee;
+  --banner-err-border: #f2cccc;
+  --banner-err-text: #bf5454;
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* 背景层级 */
+  --bg-canvas: #121212;
+  --bg-surface: #1a1a1a;
+  --bg-surface2: #161616;
+  --bg-inset: #252525;
+  --bg-inset-hover: #2e2e2e;
+  --bg-badge: #333333;
+
+  /* 卡片 */
+  --bg-card-up: #332222;
+  --bg-card-up-hover: #3d2929;
+  --bg-card-zb: #1f2a22;
+  --bg-card-zb-hover: #26352b;
+
+  /* 边框 */
+  --border-line: #333333;
+  --border-line2: #444444;
+  --border-card-up: #4d3030;
+  --border-card-zb: #3d5a44;
+
+  /* 文本 */
+  --text-ink: #e5e5e5;
+  --text-ink2: #888888;
+  --text-ink3: #666666;
+  --text-khaki: #a08b3c;
+
+  /* 提示浮层 */
+  --tip-bg: #333333;
+  --tip-border: #444444;
+  --tip-text: #d1d5db;
+  --tip-title: #ffffff;
+
+  /* 横幅 */
+  --banner-warn-bg: #2a2318;
+  --banner-warn-border: #4a3d1f;
+  --banner-warn-text: #d8b45a;
+  --banner-err-bg: #2a1a1a;
+  --banner-err-border: #4a2a2a;
+  --banner-err-text: #e08585;
+}
+
+/* 把主题变量映射为 Tailwind 工具类（inline 模式：工具类直接引用 var，可随 .dark 切换） */
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-surface2: var(--bg-surface2);
+  --color-inset: var(--bg-inset);
+  --color-inset-hover: var(--bg-inset-hover);
+  --color-badge: var(--bg-badge);
+
+  --color-card-up: var(--bg-card-up);
+  --color-card-up-hover: var(--bg-card-up-hover);
+  --color-card-zb: var(--bg-card-zb);
+  --color-card-zb-hover: var(--bg-card-zb-hover);
+
+  --color-line: var(--border-line);
+  --color-line2: var(--border-line2);
+  --color-card-up-border: var(--border-card-up);
+  --color-card-zb-border: var(--border-card-zb);
+
+  --color-ink: var(--text-ink);
+  --color-ink2: var(--text-ink2);
+  --color-ink3: var(--text-ink3);
+  --color-khaki: var(--text-khaki);
+
+  --color-tip: var(--tip-bg);
+  --color-tip-border: var(--tip-border);
+  --color-tip-text: var(--tip-text);
+  --color-tip-title: var(--tip-title);
+
+  --color-banner-warn: var(--banner-warn-bg);
+  --color-banner-warn-border: var(--banner-warn-border);
+  --color-banner-warn-text: var(--banner-warn-text);
+  --color-banner-err: var(--banner-err-bg);
+  --color-banner-err-border: var(--banner-err-border);
+  --color-banner-err-text: var(--banner-err-text);
+
+  /* 行情语义色：两套主题保持一致（红涨绿跌） */
+  --color-up: #ff4d4f;
+  --color-down: #3ecf7a;
+  --color-gold: #e8b64c;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: linear-gradient(to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
+  color: var(--text-ink);
+  background: var(--bg-canvas);
   min-height: 100vh;
-  font-family: 'Inter', sans-serif;
+  font-family: 'Inter', var(--font-geist-sans), sans-serif;
 }
 
-/* Custom Scrollbar */
+/* Custom Scrollbar（随主题变量） */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: var(--bg-canvas);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #444;
+  background: var(--border-line2);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--text-ink3);
 }
 
 .scrollbar-thin::-webkit-scrollbar {

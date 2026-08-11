@@ -33,6 +33,8 @@ interface Summary {
   maxBoardCount: number;
 }
 
+type Theme = 'light' | 'dark';
+
 // Asia/Shanghai 今日（YYYY-MM-DD）
 function shanghaiToday(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
@@ -58,11 +60,48 @@ export default function Home() {
   const [dataDate, setDataDate] = useState(''); // 响应实际代表的日期
   const [isStale, setIsStale] = useState(false); // 实时拉取失败、返回缓存快照
   const [fetchError, setFetchError] = useState(false);
+  const [theme, setTheme] = useState<Theme>('dark');
   const fetchSeq = useRef(0); // 请求序号：丢弃过期响应，避免切换日期时旧数据覆盖新数据
 
   useEffect(() => {
     setTodayStr(shanghaiToday());
   }, []);
+
+  // 主题初始化：优先用户显式选择；未选择时跟随系统偏好（并监听系统变化）
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem('zt-theme');
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = (t: Theme) => {
+      setTheme(t);
+      document.documentElement.classList.toggle('dark', t === 'dark');
+    };
+    if (stored === 'light' || stored === 'dark') {
+      apply(stored);
+    } else {
+      apply(media.matches ? 'dark' : 'light');
+      const handler = (e: MediaQueryListEvent) => apply(e.matches ? 'dark' : 'light');
+      media.addEventListener('change', handler);
+      return () => media.removeEventListener('change', handler);
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme((t) => {
+      const next: Theme = t === 'dark' ? 'light' : 'dark';
+      document.documentElement.classList.toggle('dark', next === 'dark');
+      try {
+        localStorage.setItem('zt-theme', next);
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
 
   const fetchData = useCallback(async (date: string) => {
     const seq = ++fetchSeq.current;
@@ -143,143 +182,166 @@ export default function Home() {
   const allEmpty = BOARD_KEYS.every((k) => data[k].length === 0);
 
   return (
-    <main className="flex flex-col h-screen bg-[#121212] text-white overflow-hidden">
-      {/* Header */}
-      <header className="h-12 border-b border-[#333] bg-[#1a1a1a] flex items-center justify-between px-4 gap-3 shrink-0">
+    <main className="flex flex-col h-dvh bg-canvas text-ink overflow-hidden">
+      {/* Header（窄窗口自动换行） */}
+      <header className="border-b border-line bg-surface flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <div className={`w-3 h-3 rounded-full shrink-0 ${isRealtime ? 'bg-red-500 animate-pulse' : 'bg-[#555]'}`}></div>
+          <div className={`w-3 h-3 rounded-full shrink-0 ${isRealtime ? 'bg-up animate-pulse' : 'bg-ink3'}`}></div>
           <h1 className="text-lg font-bold tracking-tight whitespace-nowrap">A股涨停梯队</h1>
           {!isRealtime && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#2a2a2a] border border-[#444] text-[#aaa] font-mono whitespace-nowrap">
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-badge border border-line text-ink2 font-mono whitespace-nowrap">
               收盘数据
             </span>
           )}
         </div>
 
-        {/* Date control */}
-        <div className="flex items-center gap-1 rounded-lg bg-[#252525] border border-[#333] p-0.5 shrink-0">
-          <button
-            onClick={() => shiftDay(-1)}
-            title="前一天"
-            className="w-6 h-6 flex items-center justify-center rounded-md text-xs text-[#888] hover:text-[#ccc] hover:bg-[#2e2e2e] transition-colors"
-          >
-            ‹
-          </button>
-          <input
-            type="date"
-            value={selectedDate}
-            min="2019-01-01"
-            max={todayStr}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            title="选择日期查看收盘数据"
-            className="bg-transparent text-xs font-mono text-[#ccc] outline-none px-1 [color-scheme:dark] w-[7.5rem] text-center"
-          />
-          <button
-            onClick={() => shiftDay(1)}
-            title="后一天"
-            className="w-6 h-6 flex items-center justify-center rounded-md text-xs text-[#888] hover:text-[#ccc] hover:bg-[#2e2e2e] transition-colors"
-          >
-            ›
-          </button>
-          {selectedDate !== '' && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Date control */}
+          <div className="flex items-center gap-1 rounded-lg bg-inset border border-line p-0.5 shrink-0">
             <button
-              onClick={() => setSelectedDate('')}
-              className="px-2 h-6 rounded-md text-[11px] font-medium text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors whitespace-nowrap"
+              onClick={() => shiftDay(-1)}
+              title="前一天"
+              className="w-6 h-6 flex items-center justify-center rounded-md text-xs text-ink2 hover:text-ink hover:bg-inset-hover transition-colors"
             >
-              今日
+              ‹
             </button>
-          )}
-        </div>
-
-        {/* Sort control */}
-        <div className="flex items-center gap-1 rounded-lg bg-[#252525] border border-[#333] p-0.5 shrink-0">
-          {(
-            [
-              { key: 'time', label: '涨停时间' },
-              { key: 'amount', label: '封单金额' },
-            ] as const
-          ).map(({ key, label }) => (
+            <input
+              type="date"
+              value={selectedDate}
+              min="2019-01-01"
+              max={todayStr}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              title="选择日期查看收盘数据"
+              className="bg-transparent text-xs font-mono text-ink outline-none px-1 w-[7.5rem] text-center"
+            />
             <button
-              key={key}
-              onClick={() => handleSort(key)}
-              title={sortBy === key ? `切换${label}排序方向` : `按${label}排序`}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
-                sortBy === key
-                  ? 'bg-red-500/15 text-red-400'
-                  : 'text-[#888] hover:text-[#ccc] hover:bg-[#2e2e2e]'
-              }`}
+              onClick={() => shiftDay(1)}
+              title="后一天"
+              className="w-6 h-6 flex items-center justify-center rounded-md text-xs text-ink2 hover:text-ink hover:bg-inset-hover transition-colors"
             >
-              {label}
-              <span
-                className={`text-[9px] leading-none transition-opacity ${sortBy === key ? 'opacity-100' : 'opacity-0'}`}
+              ›
+            </button>
+            {selectedDate !== '' && (
+              <button
+                onClick={() => setSelectedDate('')}
+                className="px-2 h-6 rounded-md text-[11px] font-medium text-up bg-up/10 hover:bg-up/20 transition-colors whitespace-nowrap"
               >
-                {sortDir === 'asc' ? '▲' : '▼'}
-              </span>
-            </button>
-          ))}
-        </div>
+                今日
+              </button>
+            )}
+          </div>
 
-        {/* Summary stats (左侧) + Last updated (右侧) */}
-        <div className="flex items-center gap-4 shrink-0">
-          <div className="flex items-center gap-4">
+          {/* Sort control（核心功能，小屏也保留，随 header 换行） */}
+          <div className="flex items-center gap-1 rounded-lg bg-inset border border-line p-0.5 shrink-0">
+            {(
+              [
+                { key: 'time', label: '涨停时间' },
+                { key: 'amount', label: '封单金额' },
+              ] as const
+            ).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => handleSort(key)}
+                title={sortBy === key ? `切换${label}排序方向` : `按${label}排序`}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  sortBy === key
+                    ? 'bg-up/15 text-up'
+                    : 'text-ink2 hover:text-ink hover:bg-inset-hover'
+                }`}
+              >
+                {label}
+                <span
+                  className={`text-[9px] leading-none transition-opacity ${sortBy === key ? 'opacity-100' : 'opacity-0'}`}
+                >
+                  {sortDir === 'asc' ? '▲' : '▼'}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Summary stats */}
+          <div className="hidden md:flex items-center gap-4 shrink-0">
             <span className="flex items-baseline gap-1.5">
-              <span className="text-xs text-[#888]">涨停</span>
-              <span className="text-base font-bold text-[#ff4d4f] font-mono leading-none">
+              <span className="text-xs text-ink2">涨停</span>
+              <span className="text-base font-bold text-up font-mono leading-none">
                 {summary ? summary.limitUpCount : '—'}
               </span>
             </span>
-            <span className="w-px h-4 bg-[#444]" />
+            <span className="w-px h-4 bg-line2" />
             <span className="flex items-baseline gap-1.5">
-              <span className="text-xs text-[#888]">跌停</span>
-              <span className="text-base font-bold text-[#3ecf7a] font-mono leading-none">
+              <span className="text-xs text-ink2">跌停</span>
+              <span className="text-base font-bold text-down font-mono leading-none">
                 {summary ? (summary.limitDownCount ?? '—') : '—'}
               </span>
             </span>
-            <span className="w-px h-4 bg-[#444]" />
+            <span className="w-px h-4 bg-line2" />
             <span className="flex items-baseline gap-1.5">
-              <span className="text-xs text-[#888]">最高连板</span>
-              <span className="text-base font-bold text-[#e8b64c] font-mono leading-none">
+              <span className="text-xs text-ink2">最高连板</span>
+              <span className="text-base font-bold text-gold font-mono leading-none">
                 {summary ? `${summary.maxBoardCount}板` : '—'}
               </span>
             </span>
           </div>
-          <span className="w-px h-5 bg-[#333]" />
-          <div className="text-xs text-[#666] font-mono flex items-center gap-1.5 min-w-0">
+
+          {/* Last updated */}
+          <span className="hidden lg:block w-px h-5 bg-line shrink-0" />
+          <div className="hidden lg:flex text-xs text-ink3 font-mono items-center gap-1.5 min-w-0">
             {loading ? (
               <span>Loading...</span>
             ) : (
               <>
-                <span className="px-1.5 py-0.5 rounded bg-[#252525] border border-[#333] text-[10px] text-[#999]">
+                <span className="px-1.5 py-0.5 rounded bg-inset border border-line text-[10px] text-ink2">
                   {isRealtime ? '实时' : '收盘'}
                 </span>
-                {!isRealtime && <span className="text-[#aaa]">{dataDate || selectedDate}</span>}
+                {!isRealtime && <span className="text-ink2">{dataDate || selectedDate}</span>}
                 {isStale && <span className="text-amber-500/80">· 缓存</span>}
                 {isRealtime && <span>Last updated: {lastUpdated}</span>}
               </>
             )}
           </div>
+
+          {/* Theme toggle */}
+          <button
+            onClick={toggleTheme}
+            title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
+            aria-label="切换深浅色主题"
+            className="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-inset border border-line text-ink2 hover:text-ink hover:bg-inset-hover transition-colors"
+          >
+            {theme === 'dark' ? (
+              // 太阳：当前深色，点击切浅色
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+              </svg>
+            ) : (
+              // 月亮：当前浅色，点击切深色
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
         </div>
       </header>
 
       {/* 历史日期无数据提示（非交易日或数据缺失） */}
       {!isRealtime && !loading && !fetchError && allEmpty && (
-        <div className="shrink-0 bg-[#2a2318] border-b border-[#4a3d1f] text-[#d8b45a] text-xs px-4 py-1.5 text-center">
+        <div className="shrink-0 bg-banner-warn border-b border-banner-warn-border text-banner-warn-text text-xs px-4 py-1.5 text-center">
           该日期暂无涨停数据（可能为非交易日，或当日数据尚未收录）
         </div>
       )}
       {fetchError && (
-        <div className="shrink-0 bg-[#2a1a1a] border-b border-[#4a2a2a] text-[#e08585] text-xs px-4 py-1.5 text-center">
+        <div className="shrink-0 bg-banner-err border-b border-banner-err-border text-banner-err-text text-xs px-4 py-1.5 text-center">
           数据加载失败，请稍后重试
         </div>
       )}
 
-      {/* Main Grid */}
-      <div className="flex-1 grid grid-cols-5 auto-rows-fr divide-x divide-[#333] min-h-0">
-        <BoardColumn title="首板 (1板)" sortBy={sortBy} {...splitByStatus(data.board1)} />
-        <BoardColumn title="2板" sortBy={sortBy} {...splitByStatus(data.board2)} />
-        <BoardColumn title="3板" sortBy={sortBy} {...splitByStatus(data.board3)} />
-        <BoardColumn title="4板" sortBy={sortBy} {...splitByStatus(data.board4)} />
-        <BoardColumn title="5板及以上" sortBy={sortBy} {...splitByStatus(data.boardHigher)} />
+      {/* Main boards：宽屏五列均分；窄屏保持最小列宽、横向滚动（看板式） */}
+      <div className="flex-1 flex overflow-x-auto overscroll-x-contain min-h-0 snap-x snap-proximity">
+        <BoardColumn className="flex-1 basis-0 min-w-[250px] snap-start" title="首板 (1板)" sortBy={sortBy} {...splitByStatus(data.board1)} />
+        <BoardColumn className="flex-1 basis-0 min-w-[250px] snap-start" title="2板" sortBy={sortBy} {...splitByStatus(data.board2)} />
+        <BoardColumn className="flex-1 basis-0 min-w-[250px] snap-start" title="3板" sortBy={sortBy} {...splitByStatus(data.board3)} />
+        <BoardColumn className="flex-1 basis-0 min-w-[250px] snap-start" title="4板" sortBy={sortBy} {...splitByStatus(data.board4)} />
+        <BoardColumn className="flex-1 basis-0 min-w-[250px] snap-start" title="5板及以上" sortBy={sortBy} {...splitByStatus(data.boardHigher)} />
       </div>
     </main>
   );
