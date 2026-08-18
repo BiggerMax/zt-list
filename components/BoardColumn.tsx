@@ -15,7 +15,7 @@ interface Stock {
     ltszText?: string;
     turnoverRate?: number;
     currentChange?: number;
-    overHigh350?: boolean;
+    overHigh250?: boolean;
 }
 
 interface BoardColumnProps {
@@ -63,7 +63,7 @@ const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortB
                         ltszText={stock.ltszText}
                         turnoverRate={stock.turnoverRate}
                         currentChange={stock.currentChange}
-                        overHigh350={stock.overHigh350}
+                        overHigh250={stock.overHigh250}
                         highlight={sortBy}
                         isHighlighted={highlightCode === stock.code}
                         onClick={onSelect ? () => onSelect(stock.code, stock.name) : undefined}
@@ -94,7 +94,7 @@ const BoardColumn: React.FC<BoardColumnProps> = ({ title, limitUp, zhaBan, sortB
                                 ltszText={stock.ltszText}
                                 turnoverRate={stock.turnoverRate}
                                 currentChange={stock.currentChange}
-                                overHigh350={stock.overHigh350}
+                                overHigh250={stock.overHigh250}
                                 isZhaBan
                                 highlight={sortBy}
                                 isHighlighted={highlightCode === stock.code}

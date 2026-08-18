@@ -19,8 +19,8 @@ const INDEXES: { code: string; name: string; secid: string; txCode: string }[] =
   { code: '399006', name: '创业板指', secid: '0.399006', txCode: 'sz399006' },
 ];
 
-// 5 秒结果缓存：前端 10s 轮询与多客户端共享，避免频繁打上游行情接口
-const CACHE_TTL_MS = 5_000;
+// 10 秒结果缓存：前端 5s 轮询与多客户端共享，上游约每 10s 拉一次（与改动前持平），但客户端数据更新一倍
+const CACHE_TTL_MS = 10_000;
 let cache: { ts: number; data: IndexQuote[] } | null = null;
 
 /** 解析腾讯行情文本：v_sh000001="1~上证指数~...~价格~...~涨跌~涨跌幅%~..." */

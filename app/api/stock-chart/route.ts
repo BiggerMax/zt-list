@@ -84,7 +84,7 @@ async function fetchRetry(url: string, headers: Record<string, string>, attempts
       const res = await fetch(url, {
         headers,
         signal: AbortSignal.timeout(7000),
-        next: { revalidate: 0 },
+
       });
       if (res.ok) return res;
       lastErr = new Error(`HTTP ${res.status}`);
@@ -294,7 +294,7 @@ async function fetchKplTrend(code: string, day: string): Promise<{ preClose: num
       },
       body,
       signal: AbortSignal.timeout(7000),
-      next: { revalidate: 0 },
+
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
@@ -333,7 +333,7 @@ async function fetchKplDayKline(code: string, lmt: number): Promise<KlineRow[] |
       },
       body,
       signal: AbortSignal.timeout(7000),
-      next: { revalidate: 0 },
+
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();

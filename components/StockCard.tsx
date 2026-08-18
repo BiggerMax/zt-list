@@ -14,8 +14,8 @@ interface StockCardProps {
     turnoverRate?: number;   // 换手率（%）
     isZhaBan?: boolean;       // 断板：上一交易日涨停、今日未涨停
     isFirstCard?: boolean;    // 是否为所在列的第一张卡片（其上方浮层会被滚动区裁剪，需改为显示在下方）
-    currentChange?: number;   // 断板股当前实时涨幅（%）
-    overHigh350?: boolean;    // 当日价突破前 350 日最高价 → 显示"新高"关注标记
+    currentChange?: number;   // 断板股当日实时涨幅（%）
+    overHigh250?: boolean;    // 当日价突破前 250 日最高价 → 显示"新高"关注标记
     highlight?: 'time' | 'amount';
     /** 点击卡片（打开个股分时/K线弹窗） */
     onClick?: () => void;
@@ -38,7 +38,7 @@ const StockCard: React.FC<StockCardProps> = ({
     isZhaBan = false,
     isFirstCard = false,
     currentChange,
-    overHigh350 = false,
+    overHigh250 = false,
     highlight,
     onClick,
     isHighlighted = false,
@@ -62,10 +62,10 @@ const StockCard: React.FC<StockCardProps> = ({
                     )}
                     <span className={`text-base font-bold leading-tight ${isZhaBan ? 'text-ink2' : 'text-ink'}`}>{name}</span>
                     {/* 创新高贴纸：金色圆形符号，贴卡片左上角，不占卡片内布局 */}
-                    {overHigh350 && (
+                    {overHigh250 && (
                         <span
-                            title="股价突破前 350 日最高价（前复权）"
-                            aria-label="股价突破前 350 日最高价"
+                            title="股价突破前 250 日最高价（前复权）"
+                            aria-label="股价突破前 250 日最高价"
                             className="absolute -top-2 -left-2 w-5 h-5 rounded-full bg-gold text-white flex items-center justify-center border-2 border-white shadow-[0_1px_4px_rgba(0,0,0,0.35)] rotate-12 transition-transform group-hover:rotate-6 z-[1]"
                         >
                             {/* 上升箭头：表示价格创新高 */}
@@ -102,12 +102,12 @@ const StockCard: React.FC<StockCardProps> = ({
                 {isZhaBan ? (
                     <div className="flex flex-col items-end ml-2 whitespace-nowrap shrink-0">
                         {currentChange != null ? (
-                            <span className={`text-sm font-bold ${currentChange >= 0 ? 'text-up' : 'text-down'}`}>
+                            <span className={`text-sm font-bold ${currentChange >= 0 ? 'text-up' : 'text-down'}`} title="当日涨幅">
                                 {currentChange >= 0 ? '+' : ''}
                                 {currentChange.toFixed(2)}%
                             </span>
                         ) : (
-                            <span className="text-[10px] text-ink2">未涨停</span>
+                            <span className="text-[10px] text-ink2" title="当日涨幅暂不可用">—</span>
                         )}
                         <span className="text-[10px] text-khaki mt-0.5">昨涨停</span>
                     </div>

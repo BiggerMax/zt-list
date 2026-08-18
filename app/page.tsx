@@ -3,6 +3,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import BoardColumn from '@/components/BoardColumn';
 import StockChartModal from '@/components/StockChartModal';
+import pkg from '../package.json';
+import { fetchLimitUpData } from '@/lib/limitUpAggregator';
 
 interface Stock {
   code: string;
@@ -20,8 +22,8 @@ interface Stock {
   turnoverText?: string; // 成交额（格式化，如 2.45亿）
   ltszText?: string; // 流通值（格式化，如 36.99亿）
   turnoverRate?: number; // 换手率（%）
-  currentChange?: number; // 断板股当日涨幅（%）
-  overHigh350?: boolean; // 当日价突破前 350 日最高价 → 卡片显示"新高"关注标记
+  currentChange?: number; // 断板股当日实时涨幅（%）
+  overHigh250?: boolean; // 当日价突破前 250 日最高价 → 卡片显示"新高"关注标记
 }
 
 interface BoardData {
@@ -50,6 +52,21 @@ type Theme = 'light' | 'dark';
 // Asia/Shanghai 今日（YYYY-MM-DD）
 function shanghaiToday(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+}
+
+// Asia/Shanghai 当前时间（round-trip 转成本地 Date，便于读取小时/分钟）
+function cnNow(): Date {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+}
+
+// 是否交易时间：工作日 9:15–11:30 / 13:00–15:05（含集合竞价；延至 15:05 以触发服务端收盘快照落盘；
+// 法定节假日无法在客户端判定，可用开关手动控制）
+function isTradingTime(): boolean {
+  const n = cnNow();
+  const day = n.getDay();
+  if (day === 0 || day === 6) return false; // 周末
+  const mins = n.getHours() * 60 + n.getMinutes();
+  return (mins >= 9 * 60 + 15 && mins <= 11 * 60 + 30) || (mins >= 13 * 60 && mins <= 15 * 60 + 5);
 }
 
 const BOARD_KEYS: (keyof BoardData)[] = ['board1', 'board2', 'board3', 'board4', 'boardHigher'];
@@ -84,8 +101,21 @@ export default function Home() {
       return true;
     }
   });
-  const alertedHigh350 = useRef<Set<string>>(new Set()); // 当日已登记“突破 350 日高”的个股（已登记的只登记不重复播报）
-  const seededHigh350 = useRef(false); // 首次加载只静默登记、不播报，只提醒“新突破”
+  // 数据请求开关：默认非交易时间不请求；用户手动切换后以用户为准（记住选择）
+  const [fetchEnabled, setFetchEnabled] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('zt-fetch');
+      if (stored === 'on') return true;
+      if (stored === 'off') return false;
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+    return isTradingTime(); // 默认：交易时间内开启，非交易时间关闭（不请求数据）
+  });
+  const fetchTouched = useRef(false); // 用户是否手动切换过开关（手动设置后不再自动跟随交易时间）
+  const autoLoadedLatest = useRef(false); // 非交易时间首次打开是否已自动拉取最近交易日收盘数据（仅一次）
+  const alertedHigh250 = useRef<Set<string>>(new Set()); // 当日已登记“突破 250 日高”的个股（已登记的只登记不重复播报）
+  const seededHigh250 = useRef(false); // 首次加载只静默登记、不播报，只提醒“新突破”
   const prevDataDay = useRef(''); // 上一个交易日，跨日时清空登记
   const lastBeepAt = useRef(0); // 防连发：同一轮多股突破时最小间隔
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -130,12 +160,26 @@ export default function Home() {
     });
   };
 
+  // 数据请求开关：手动切换后以用户为准（记住选择），不再自动跟随交易时间
+  const toggleFetch = () => {
+    fetchTouched.current = true;
+    setFetchEnabled((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem('zt-fetch', next ? 'on' : 'off');
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
+
   // 突破提醒：Web Audio 提示音（双击上扬音 A5→D6）+ 语音合成播报股票名称；受自动播放策略限制时静默失败
   const playHighAlert = useCallback((stockName?: string) => {
     // 语音播报：读出突破的股票名称。队列播放，同一轮多股突破时依次播报，不受提示音连发限制
     if (stockName && typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
-        const utterance = new SpeechSynthesisUtterance(`${stockName}，突破350日高点`);
+        const utterance = new SpeechSynthesisUtterance(`${stockName}，突破250日高点`);
         utterance.lang = 'zh-CN';
         utterance.rate = 1;
         utterance.pitch = 1.05;
@@ -204,18 +248,36 @@ export default function Home() {
     }
   }, [soundOn]);
 
-  const fetchData = useCallback(async (date: string) => {
+  // 首次挂载：localStorage 已有记录视为用户手动设置，此后不再自动跟随交易时间
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('zt-fetch') !== null) fetchTouched.current = true;
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // 未手动设置时自动跟随交易时间：开盘自动开启、收盘/午休自动暂停（每 30s 检查一次）
+  useEffect(() => {
+    const check = () => {
+      if (fetchTouched.current) return;
+      setFetchEnabled(isTradingTime());
+    };
+    check();
+    const t = window.setInterval(check, 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const fetchData = useCallback(async (date: string, latest = false) => {
     const seq = ++fetchSeq.current;
     try {
-      const qs = date ? `?date=${date}` : '';
-      const res = await fetch(`/api/limit-up${qs}`);
-      if (!res.ok) throw new Error('Failed to fetch');
-      const jsonData = await res.json();
+      const options = latest ? { latest: true } : date ? { date } : {};
+      const jsonData = await fetchLimitUpData(options);
       if (seq !== fetchSeq.current) return; // 已有更新的请求，丢弃本次响应
       setData(jsonData);
       setSummary(jsonData.summary ?? null);
       setDataDate(jsonData.date ?? '');
-      setIsStale(!!jsonData.stale);
+      setIsStale(false);
       setFetchError(false);
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (error) {
@@ -227,71 +289,101 @@ export default function Home() {
     }
   }, []);
 
-  // 指数轮询：10s 自调度（与服务端 5s 结果缓存错峰），慢网络不堆叠
+  // 指数拉取（供自动轮询与手动刷新复用）
+  const fetchIndicesOnce = useCallback(async () => {
+    try {
+      const res = await fetch('/api/indices');
+      if (res.ok) {
+        const j = await res.json();
+        if (Array.isArray(j.indices)) setIndices(j.indices);
+      }
+    } catch {
+      /* 指数失败不影响看板 */
+    }
+  }, []);
+
+  // 指数轮询：5s 自调度（配合服务端 10s 结果缓存，上游约每 10s 拉一次），慢网络不堆叠；开关关闭时暂停请求
   useEffect(() => {
+    if (!fetchEnabled) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
-    const fetchIndices = async () => {
-      try {
-        const res = await fetch('/api/indices');
-        if (res.ok) {
-          const j = await res.json();
-          if (Array.isArray(j.indices)) setIndices(j.indices);
-        }
-      } catch {
-        /* 指数失败不影响看板 */
-      }
-    };
     const loop = async () => {
       if (stopped) return;
-      await fetchIndices();
+      await fetchIndicesOnce();
       if (stopped) return;
-      timer = setTimeout(loop, 10_000);
+      timer = setTimeout(loop, 5_000);
     };
     void loop();
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [fetchEnabled, fetchIndicesOnce]);
 
-  // 仅“今日”为实时轮询；历史日期为收盘静态数据，只拉一次
+  // 立即刷新一次（开关关闭/非交易时间时仍可手动拉取最新数据，不启动自动轮询）
+  const manualRefresh = useCallback(() => {
+    setLoading(true);
+    // 非交易时间刷新“今日”视图时拉取最近一个交易日收盘数据；交易时间内则拉实时数据
+    void fetchData(selectedDate, !isTradingTime() && selectedDate === '');
+    void fetchIndicesOnce();
+  }, [fetchData, fetchIndicesOnce, selectedDate]);
+
+  // 仅“今日”为实时轮询；历史日期为收盘静态数据，只拉一次（用户主动查看，不受开关限制）
   const isRealtime = selectedDate === '' || (todayStr !== '' && selectedDate === todayStr);
 
   useEffect(() => {
     if (!todayStr) return;
+    // 历史日期：用户主动查看，不受请求开关限制
+    if (!isRealtime) {
+      setLoading(true);
+      fetchData(selectedDate);
+      return;
+    }
+    // 实时轮询：受请求开关控制（默认非交易时间不请求数据）
+    if (!fetchEnabled) {
+      // 非交易时间首次打开：自动拉取最近一个交易日的收盘数据展示（仅一次；之后手动刷新走横幅按钮）
+      if (!autoLoadedLatest.current) {
+        autoLoadedLatest.current = true;
+        if (!isTradingTime()) {
+          setLoading(true);
+          void fetchData('', true);
+          void fetchIndicesOnce();
+          return;
+        }
+      }
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     fetchData(selectedDate);
-    if (isRealtime) {
-      // 自调度轮询：上一次请求完成后再等 10s，慢网络下不会堆叠请求；配合服务端 15s 结果缓存
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      let stopped = false;
-      const loop = async () => {
-        if (stopped) return;
-        await fetchData(selectedDate);
-        if (stopped) return;
-        timer = setTimeout(loop, 10_000);
-      };
-      void loop();
-      return () => {
-        stopped = true;
-        if (timer) clearTimeout(timer);
-      };
-    }
-  }, [selectedDate, todayStr, isRealtime, fetchData]);
+    // 自调度轮询：上一次请求完成后再等 5s，慢网络下不会堆叠请求；配合服务端 15s 结果缓存
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    const loop = async () => {
+      if (stopped) return;
+      await fetchData(selectedDate);
+      if (stopped) return;
+      timer = setTimeout(loop, 5_000);
+    };
+    void loop();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [selectedDate, todayStr, isRealtime, fetchEnabled, fetchData, fetchIndicesOnce]);
 
-  // 突破 350 日高声音提醒：仅实时轮询生效。个股首次出现 overHigh350 时播报，当日不重复；
+  // 突破 250 日高声音提醒：仅实时轮询生效。个股首次出现 overHigh250 时播报，当日不重复；
   // 首次加载只静默登记（只提醒“新突破”）；切到历史日期或跨交易日时清空登记。
   useEffect(() => {
     if (!isRealtime) {
-      alertedHigh350.current.clear();
-      seededHigh350.current = false;
+      alertedHigh250.current.clear();
+      seededHigh250.current = false;
       return;
     }
     // 跨交易日（dataDate 变化）时清空登记，让新一天重新按“首次”语义计算
     if (prevDataDay.current && dataDate && prevDataDay.current !== dataDate) {
-      alertedHigh350.current.clear();
-      seededHigh350.current = false;
+      alertedHigh250.current.clear();
+      seededHigh250.current = false;
     }
     if (dataDate) prevDataDay.current = dataDate;
     // 挂载初始空数据（dataDate 尚未就绪）时静默返回：不要把“已登记”提前置位，
@@ -299,12 +391,12 @@ export default function Home() {
     if (!dataDate) return;
     for (const bk of BOARD_KEYS) {
       for (const s of data[bk]) {
-        if (!s.overHigh350 || alertedHigh350.current.has(s.code)) continue;
-        alertedHigh350.current.add(s.code);
-        if (seededHigh350.current && soundOn) playHighAlert(s.name);
+        if (!s.overHigh250 || alertedHigh250.current.has(s.code)) continue;
+        alertedHigh250.current.add(s.code);
+        if (seededHigh250.current && soundOn) playHighAlert(s.name);
       }
     }
-    seededHigh350.current = true;
+    seededHigh250.current = true;
   }, [data, isRealtime, dataDate, soundOn, playHighAlert]);
 
   // 日期加减一天（不越过今天）
@@ -345,7 +437,7 @@ export default function Home() {
     return arr;
   };
 
-  // 拆分涨停股与断板股：涨停股按当前排序规则，断板股按当日涨幅从高到低（缺涨幅的排最后）
+  // 拆分涨停股与断板股：涨停股按当前排序规则；断板股按当日实时涨幅从高到低（缺涨幅的排最后）
   const splitByStatus = (stocks: Stock[]) => {
     const limitUp = stocks.filter((s) => !s.isZhaBan);
     const zhaBan = stocks.filter((s) => s.isZhaBan);
@@ -397,8 +489,19 @@ export default function Home() {
         {/* 第一行：标题（左）+ 更新时间（右上角，与 A股涨停梯队 并排） */}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
-            <div className={`w-3 h-3 rounded-full shrink-0 ${isRealtime ? 'bg-up animate-pulse' : 'bg-ink3'}`}></div>
+            <div
+              className={`w-3 h-3 rounded-full shrink-0 ${
+                !isRealtime ? 'bg-ink3' : fetchEnabled ? 'bg-up animate-pulse' : 'bg-amber-500'
+              }`}
+              title={!fetchEnabled ? '自动刷新已暂停' : undefined}
+            ></div>
           <h1 className="text-lg font-bold tracking-tight whitespace-nowrap">A股涨停梯队</h1>
+          <span
+            title={`版本 v${pkg.version}（发布新版本时更新 package.json 的 version）`}
+            className="text-[10px] px-1.5 py-0.5 rounded-md bg-inset border border-line text-ink3 font-mono whitespace-nowrap"
+          >
+            v{pkg.version}
+          </span>
           {!isRealtime && (
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-badge border border-line text-ink2 font-mono whitespace-nowrap">
               收盘数据
@@ -427,12 +530,19 @@ export default function Home() {
               <span className="whitespace-nowrap">Loading...</span>
             ) : (
               <>
-                <span className="px-1.5 py-0.5 rounded bg-inset border border-line text-[10px] text-ink2 whitespace-nowrap">
-                  {isRealtime ? '实时' : '收盘'}
+                <span
+                  className={`px-1.5 py-0.5 rounded bg-inset border border-line text-[10px] whitespace-nowrap ${
+                    !isRealtime ? 'text-ink2' : fetchEnabled ? 'text-ink2' : 'text-amber-500/90'
+                  }`}
+                >
+                  {!isRealtime ? '收盘' : fetchEnabled ? '实时' : '已暂停'}
                 </span>
                 {!isRealtime && <span className="text-ink2 truncate">{dataDate || selectedDate}</span>}
+                {isRealtime && !fetchEnabled && dataDate && dataDate !== todayStr && (
+                  <span className="text-ink2 truncate">收盘 {dataDate}</span>
+                )}
                 {isStale && <span className="text-amber-500/80 whitespace-nowrap">· 缓存</span>}
-                {isRealtime && <span className="whitespace-nowrap">Last updated: {lastUpdated}</span>}
+                {isRealtime && lastUpdated && <span className="whitespace-nowrap">Last updated: {lastUpdated}</span>}
               </>
             )}
           </div>
@@ -571,10 +681,40 @@ export default function Home() {
             )}
           </button>
 
-          {/* 声音提醒开关（突破 350 日高时播放提示音） */}
+          {/* 数据请求开关（默认非交易时间不请求；可手动切换） */}
+          <button
+            onClick={toggleFetch}
+            title={fetchEnabled ? '自动刷新已开启（点击暂停数据请求）' : '自动刷新已暂停（点击开启）'}
+            aria-label="切换数据请求"
+            aria-pressed={fetchEnabled}
+            className={`w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-inset border transition-colors ${
+              fetchEnabled
+                ? 'border-line text-ink2 hover:text-ink hover:bg-inset-hover'
+                : 'border-line text-ink3 opacity-60 hover:opacity-100'
+            }`}
+          >
+            {fetchEnabled ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 13a10 10 0 0 1 14 0" />
+                <path d="M8.5 16.5a5 5 0 0 1 7 0" />
+                <path d="M2 8.82a15 15 0 0 1 20 0" />
+                <path d="M12 20h.01" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 13a10 10 0 0 1 14 0" />
+                <path d="M8.5 16.5a5 5 0 0 1 7 0" />
+                <path d="M2 8.82a15 15 0 0 1 20 0" />
+                <path d="M12 20h.01" />
+                <path d="m2 2 20 20" />
+              </svg>
+            )}
+          </button>
+
+          {/* 声音提醒开关（突破 250 日高时播放提示音） */}
           <button
             onClick={() => setSoundOn((s) => !s)}
-            title={soundOn ? '声音提醒已开启：个股突破 350 日高时播放提示音（点击关闭）' : '声音提醒已关闭（点击开启）'}
+            title={soundOn ? '声音提醒已开启：个股突破 250 日高时播放提示音（点击关闭）' : '声音提醒已关闭（点击开启）'}
             aria-label="切换声音提醒"
             aria-pressed={soundOn}
             className={`w-8 h-8 shrink-0 flex items-center justify-center rounded-lg bg-inset border transition-colors ${
@@ -609,6 +749,19 @@ export default function Home() {
       {fetchError && (
         <div className="shrink-0 bg-banner-err border-b border-banner-err-border text-banner-err-text text-xs px-4 py-1.5 text-center">
           数据加载失败，请稍后重试
+        </div>
+      )}
+      {/* 数据请求暂停提示（默认非交易时间不请求；提供一次性手动刷新） */}
+      {!fetchEnabled && isRealtime && (
+        <div className="shrink-0 bg-banner-warn border-b border-banner-warn-border text-banner-warn-text text-xs px-4 py-1.5 flex items-center justify-center gap-3 flex-wrap">
+          <span>{!isTradingTime() ? '当前非交易时间，已暂停自动刷新' : '自动刷新已暂停'}</span>
+          <button
+            onClick={manualRefresh}
+            title="手动拉取一次最新数据（不会启动自动轮询）"
+            className="px-2 py-0.5 rounded bg-inset border border-line text-ink2 hover:text-ink hover:bg-inset-hover transition-colors"
+          >
+            立即刷新一次
+          </button>
         </div>
       )}
 

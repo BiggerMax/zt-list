@@ -2,12 +2,8 @@ name = "zt-list"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 main = ".open-next/worker.js"
+account_id = "b02fbc92220ae4bbf30d40dd2e5fe491"
 
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"
-
-# 数据持久化：按日期保存每日涨停快照，用于历史日期回看
-[[kv_namespaces]]
-binding = "LIMIT_UP_KV"
-id = "303f1b6f609b4409b0256fb20fee05a3"
