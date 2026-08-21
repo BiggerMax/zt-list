@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
+import { fuyaoGet, toThsCode, type FuyaoSnapshotItem } from '@/lib/fuyao';
 
-// 轻量代理：转发开盘啦/腾讯实时行情
-// 用于获取断板股当日实时涨幅
+// 轻量代理：断板股涨幅查询
+// 实时：同花顺批量行情快照（官方）→ 开盘啦 → 东财兜底
+// 历史：同花顺日K（官方）→ 开盘啦日K兜底
+// 输出统一为 { quotes: { [6位代码]: 涨跌幅% }, source }
 
 export const dynamic = 'force-dynamic';
 
@@ -33,8 +36,18 @@ export async function GET(request: Request) {
 
   const codes = codesParam.split(',').filter(Boolean);
 
-  // 历史日期：使用开盘啦日K计算涨幅
+  // 历史日期：优先同花顺日K，回退开盘啦
   if (date) {
+    try {
+      const quotes = await fetchFuyaoHistorical(codes, date);
+      if (Object.keys(quotes).length > 0) {
+        const body = { quotes, source: 'fuyao' };
+        cache.set(key, { ts: now, body });
+        return NextResponse.json(body);
+      }
+    } catch {
+      // fall through to kpl
+    }
     try {
       const quotes = await fetchKPLHistorical(codes, date);
       const body = { quotes, source: 'kpl' };
@@ -45,7 +58,19 @@ export async function GET(request: Request) {
     }
   }
 
-  // 实时：开盘啦批量行情
+  // 实时：同花顺批量快照
+  try {
+    const quotes = await fetchFuyaoRealtime(codes);
+    if (Object.keys(quotes).length > 0) {
+      const body = { quotes, source: 'fuyao' };
+      cache.set(key, { ts: now, body });
+      return NextResponse.json(body);
+    }
+  } catch {
+    // fall through
+  }
+
+  // 兜底1：开盘啦批量行情
   try {
     const quotes = await fetchKPLRealtime(codes);
     if (Object.keys(quotes).length > 0) {
@@ -57,7 +82,7 @@ export async function GET(request: Request) {
     // fall through
   }
 
-  // 兜底：东财实时行情
+  // 兜底2：东财实时行情
   try {
     const quotes = await fetchEMRealtime(codes);
     const body = { quotes, source: 'em' };
@@ -66,6 +91,66 @@ export async function GET(request: Request) {
   } catch {
     return NextResponse.json({ quotes: {}, source: 'none' });
   }
+}
+
+/** 同花顺批量实时涨跌幅（官方接口，一次调用） */
+async function fetchFuyaoRealtime(codes: string[]): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const BATCH_SIZE = 80;
+  for (let i = 0; i < codes.length; i += BATCH_SIZE) {
+    const chunk = codes.slice(i, i + BATCH_SIZE);
+    const data = await fuyaoGet<{ item?: FuyaoSnapshotItem[] }>('/api/a-share/prices/snapshot', {
+      thscodes: chunk.map(toThsCode).join(','),
+    });
+    for (const it of data.item ?? []) {
+      const v = it.price_change_ratio_pct;
+      if (it.ticker && Number.isFinite(v)) out[it.ticker] = v;
+    }
+  }
+  return out;
+}
+
+/** 同花顺历史日K涨跌幅：目标日收盘 vs 前一交易日收盘（官方接口，无 token 过期问题） */
+async function fetchFuyaoHistorical(codes: string[], dateStr: string): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const CONCURRENCY = 10;
+
+  const fetchOne = async (code: string): Promise<[string, number]> => {
+    try {
+      const thscode = toThsCode(code);
+      // 取目标日前 40 个自然日起的日K，足够覆盖节假日间隔
+      const startMs = Math.floor(
+        new Date(`${dateStr}T00:00:00+08:00`).getTime() - 40 * 86_400_000,
+      );
+      const endMs = Math.floor(new Date(`${dateStr}T23:59:59+08:00`).getTime());
+      const data = await fuyaoGet<{
+        item?: { date_ms: number; close_price: number }[];
+      }>('/api/a-share/prices/historical', {
+        thscode,
+        interval: '1d',
+        start: startMs,
+        end: endMs,
+        adjust: 'none',
+      });
+      const bars = data.item ?? [];
+      if (bars.length < 2) return [code, NaN];
+      const close = Number(bars[bars.length - 1]?.close_price);
+      const prevClose = Number(bars[bars.length - 2]?.close_price);
+      if (!Number.isFinite(close) || !Number.isFinite(prevClose) || prevClose === 0) {
+        return [code, NaN];
+      }
+      return [code, ((close - prevClose) / prevClose) * 100];
+    } catch {
+      return [code, NaN];
+    }
+  };
+
+  for (let i = 0; i < codes.length; i += CONCURRENCY) {
+    const chunk = codes.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(fetchOne));
+    for (const [code, v] of results) if (!Number.isNaN(v)) out[code] = v;
+  }
+  return out;
 }
 
 /** 开盘啦实时批量行情（increase_rate） */
@@ -116,7 +201,7 @@ async function fetchEMRealtime(codes: string[]): Promise<Record<string, number>>
   return out;
 }
 
-/** 历史某日收盘涨跌幅：开盘啦日K计算 */
+/** 历史某日收盘涨跌幅兜底：开盘啦日K计算 */
 async function fetchKPLHistorical(codes: string[], dateStr: string): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   const CONCURRENCY = 10;

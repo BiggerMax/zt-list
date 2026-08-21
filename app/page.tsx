@@ -71,6 +71,13 @@ function isTradingTime(): boolean {
 
 const BOARD_KEYS: (keyof BoardData)[] = ['board1', 'board2', 'board3', 'board4', 'boardHigher'];
 
+// 数据源标识 → 展示名
+const SOURCE_LABELS: Record<string, string> = {
+  fuyao: '同花顺',
+  em: '东财',
+  kpl: '开盘啦',
+};
+
 export default function Home() {
   const [data, setData] = useState<BoardData>({
     board1: [],
@@ -87,6 +94,7 @@ export default function Home() {
   const [selectedDate, setSelectedDate] = useState(''); // '' = 今日（实时）
   const [todayStr, setTodayStr] = useState('');
   const [dataDate, setDataDate] = useState(''); // 响应实际代表的日期
+  const [dataSource, setDataSource] = useState(''); // 涨停池数据源：fuyao | em
   const [isStale, setIsStale] = useState(false); // 实时拉取失败、返回缓存快照
   const [fetchError, setFetchError] = useState(false);
   const [indices, setIndices] = useState<IndexQuote[]>([]);
@@ -277,6 +285,7 @@ export default function Home() {
       setData(jsonData);
       setSummary(jsonData.summary ?? null);
       setDataDate(jsonData.date ?? '');
+      setDataSource((jsonData as { source?: string }).source ?? '');
       setIsStale(false);
       setFetchError(false);
       setLastUpdated(new Date().toLocaleTimeString());
@@ -505,6 +514,14 @@ export default function Home() {
           {!isRealtime && (
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-badge border border-line text-ink2 font-mono whitespace-nowrap">
               收盘数据
+            </span>
+          )}
+          {dataSource && (
+            <span
+              title={`涨停池数据源：${SOURCE_LABELS[dataSource] ?? dataSource}（同花顺失败时自动切换东财）`}
+              className="text-[10px] px-2 py-0.5 rounded-full bg-inset border border-line text-ink3 font-mono whitespace-nowrap"
+            >
+              数据源 {SOURCE_LABELS[dataSource] ?? dataSource}
             </span>
           )}
           {/* 涨停股板块前三：板块名 + 涨停家数 */}

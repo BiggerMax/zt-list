@@ -44,8 +44,8 @@ export async function GET(request: Request) {
     fetchBigOrderBatch(secids),
   ]);
 
-  // 前250日最高价（仅对非当日有效，或使用缓存策略）
-  let high250Map: Record<string, number> = {};
+  // 前250日最高价 + 当日最高价（失败不影响主数据）
+  let high250Map: Record<string, { high250: number; todayHigh: number | null }> = {};
   try {
     high250Map = await fetchHigh250Batch(codes, date);
   } catch {
@@ -55,10 +55,14 @@ export async function GET(request: Request) {
   const details: Record<string, StockDetail> = {};
   for (const code of codes) {
     const secid = secidOf(code);
+    const hi = high250Map[code];
+    // 创新高：当日最高价 > 前250日最高价（当日数据缺失时按非新高处理）
+    const overHigh250 =
+      hi != null && hi.todayHigh != null ? hi.todayHigh > hi.high250 : false;
     details[code] = {
       concept: conceptMap[secid] ?? '',
       bigOrderNet: bigOrderMap[secid] ?? 0,
-      overHigh250: high250Map[code] != null ? true : false,
+      overHigh250,
     };
   }
 
@@ -156,46 +160,102 @@ async function fetchBigOrderPerStock(secids: string[]): Promise<Record<string, n
   return map;
 }
 
-/** 前250日最高价：仅返回已缓存或可快速获取的数据 */
-async function fetchHigh250Batch(codes: string[], dateStr: string): Promise<Record<string, number>> {
-  const map: Record<string, number> = {};
+// 前250日最高价缓存：按 (code, date) 记忆，盘中多轮轮询命中即跳过上游请求
+// 250日高（已排除当日实时K线）在单个交易日内是稳定值，跨日由 date 键自动区分；
+// 失败值短时间缓存（防抖），避免偶发失败在每轮轮询中反复请求、导致标志抖动
+// 成功值缓存 { high250, todayHigh }（见 fetchHigh250Batch 的 Result 类型）
+const HIGH250_CACHE_TTL_MS = 30 * 60_000; // 成功值：30 分钟
+const HIGH250_NEGATIVE_TTL_MS = 30_000;   // 失败值：30 秒防抖
+const high250Cache = new Map<
+  string,
+  { ts: number; value: { high250: number; todayHigh: number | null } | null }
+>();
+
+/** 写入前250日高缓存；超容量时顺带清理过期键，防止长期使用后无限增长 */
+function setHigh250Cache(key: string, value: { high250: number; todayHigh: number | null } | null) {
+  high250Cache.set(key, { ts: Date.now(), value });
+  if (high250Cache.size > 5000) {
+    const cutoff = Date.now() - HIGH250_CACHE_TTL_MS;
+    for (const [k, v] of high250Cache) {
+      if (v.ts < cutoff) high250Cache.delete(k);
+    }
+  }
+}
+
+/** 前250日最高价 + 当日最高价：优先命中记忆缓存，未命中再请求上游（3 次尝试 + 递增退避）
+ *  返回值：{ high250, todayHigh } —— todayHigh 为 null 表示当日数据缺失（如停牌），
+ *  此时判定阶段按「非新高」处理 */
+async function fetchHigh250Batch(codes: string[], dateStr: string) {
+  type Result = { high250: number; todayHigh: number | null };
+  const map: Record<string, Result> = {};
   if (!dateStr || codes.length === 0) return map;
 
   const compactDate = dateStr.replace(/-/g, '');
-  const CONCURRENCY = 12;
+  const now = Date.now();
 
-  const fetchOne = async (code: string): Promise<[string, number | null]> => {
+  // 命中记忆缓存：成功值直接返回；失败值在防抖窗口内本轮跳过
+  const todo: string[] = [];
+  for (const code of codes) {
+    const hit = high250Cache.get(`${code}|${dateStr}`);
+    if (!hit) {
+      todo.push(code);
+    } else if (hit.value != null) {
+      map[code] = hit.value;
+    } else if (now - hit.ts >= HIGH250_NEGATIVE_TTL_MS) {
+      todo.push(code); // 已过防抖窗口，允许重试
+    }
+  }
+  if (todo.length === 0) return map;
+
+  const CONCURRENCY = 12;
+  const backoff = [400, 900]; // 每两次尝试间的退避（毫秒），末次尝试失败后不再等待
+
+  const fetchOne = async (code: string): Promise<[string, Result | null]> => {
     // 东财前复权日K（lmt=251，end=目标日期）
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const key = `${code}|${dateStr}`;
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const secid = secidOf(code);
         const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&klt=101&fqt=1&lmt=251&end=${compactDate}&fields1=f1,f2,f3&fields2=f51,f54`;
         const res = await fetch(url, {
           headers: { Referer: 'https://quote.eastmoney.com/', 'User-Agent': EM_UA },
-          signal: AbortSignal.timeout(6000),
+          signal: AbortSignal.timeout(8000),
         });
-        if (!res.ok) continue;
+        if (!res.ok) throw new Error(`http ${res.status}`);
         const json = await res.json();
         const klines: string[] = json?.data?.klines ?? [];
-        if (klines.length < 2) continue;
-        // 去掉当日，取前250日最高
+        if (klines.length < 2) throw new Error('empty klines');
+        // 去掉当日（最后一行），取前250日最高
         const slice = klines.slice(Math.max(0, klines.length - 251), klines.length - 1);
-        if (slice.length === 0) continue;
         let mx = -Infinity;
         for (const k of slice) {
           const h = Number(k.split(',')[1]);
           if (h > mx) mx = h;
         }
-        if (mx > -Infinity) return [code, mx];
+        if (mx <= -Infinity) throw new Error('empty slice');
+        // 当日最高价：最后一行（当日实时/收盘K线）的 f51 字段
+        const last = klines[klines.length - 1].split(',');
+        const todayHighRaw = Number(last[1]);
+        const result: Result = {
+          high250: mx,
+          todayHigh: !Number.isNaN(todayHighRaw) && todayHighRaw > 0 ? todayHighRaw : null,
+        };
+        setHigh250Cache(key, result);
+        return [code, result];
       } catch {
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 300));
+        // 进入下一轮尝试
+      }
+      if (attempt < backoff.length) {
+        await new Promise((r) => setTimeout(r, backoff[attempt] + Math.floor(Math.random() * 150)));
       }
     }
+    // 全部尝试失败：短暂记录失败，避免下轮轮询立刻重试同一批
+    setHigh250Cache(key, null);
     return [code, null];
   };
 
-  for (let i = 0; i < codes.length; i += CONCURRENCY) {
-    const chunk = codes.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < todo.length; i += CONCURRENCY) {
+    const chunk = todo.slice(i, i + CONCURRENCY);
     const results = await Promise.all(chunk.map(fetchOne));
     for (const [code, h] of results) {
       if (h != null) map[code] = h;

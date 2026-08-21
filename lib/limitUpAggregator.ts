@@ -42,6 +42,7 @@ export interface BoardData {
   summary: Summary;
   date: string;
   today: string;
+  source?: string; // 涨停池主数据源：fuyao（同花顺）| em（东财）
   stale?: boolean;
   cached?: boolean;
 }
@@ -146,22 +147,17 @@ export async function fetchLimitUpData(options: FetchOptions = {}): Promise<Boar
   }
 
   // 3. 获取上一交易日涨停队列（用于断板股识别）
-  let prevPool: XGBStock[] = [];
-  let prevDate: string | null = null;
-  if (isToday) {
-    prevDate = await findPrevXGBDate(dateStr);
-  } else {
-    prevDate = await findPrevXGBDate(dateStr);
-  }
-  if (prevDate) {
-    try {
-      const prevRes = await fetch(`/api/xgb?date=${prevDate}`);
-      if (prevRes.ok) {
-        const prevJson = await prevRes.json();
-        prevPool = prevJson.data ?? [];
+  //    日期由同花顺交易日历精确定位；选股宝该日无数据时最多再回溯一个交易日
+  let prevDate = await findPrevTradingDay(dateStr);
+  let prevPool: XGBStock[] = await fetchXGBPool(prevDate);
+  if (prevDate && prevPool.length === 0) {
+    const older = await findPrevTradingDay(prevDate);
+    if (older) {
+      const olderPool = await fetchXGBPool(older);
+      if (olderPool.length > 0) {
+        prevDate = older;
+        prevPool = olderPool;
       }
-    } catch {
-      // 失败则无断板股
     }
   }
 
@@ -209,6 +205,7 @@ export async function fetchLimitUpData(options: FetchOptions = {}): Promise<Boar
     ...result,
     date: dateStr,
     today: todayStr,
+    source: poolData.source,
   };
 }
 
@@ -218,8 +215,40 @@ function shanghaiToday(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
 }
 
+/** 近一年 A 股交易日（升序），来自同花顺交易日历；失败返回 null 走旧探测逻辑 */
+let tradingDaysCache: { day: string; dates: string[] } | null = null;
+async function fetchTradingDays(): Promise<string[] | null> {
+  const today = shanghaiToday();
+  if (tradingDaysCache?.day === today) return tradingDaysCache.dates;
+  try {
+    const res = await fetch(`/api/calendar`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const dates: string[] = json.dates ?? [];
+    if (dates.length === 0) return null;
+    tradingDaysCache = { day: today, dates };
+    return dates;
+  } catch {
+    return null;
+  }
+}
+
 /** 从今天往前找最近一个有数据的交易日 */
 async function resolveLatestTradingDate(todayStr: string): Promise<string> {
+  // 优先：同花顺交易日历精确定位（含节假日）
+  const days = await fetchTradingDays();
+  if (days) {
+    const latest = [...days].reverse().find((d) => d <= todayStr);
+    if (latest) {
+      try {
+        const res = await fetch(`/api/pool?date=${latest.replace(/-/g, '')}&topic=zt`);
+        const json = await res.json();
+        if (json.pool && json.pool.length > 0) return latest;
+      } catch {
+        // 日历定位的交易日无池数据 → 继续走兜底探测
+      }
+    }
+  }
   const d = new Date(`${todayStr}T12:00:00`);
   for (let i = 0; i < 12; i++) {
     const day = d.getDay();
@@ -239,24 +268,35 @@ async function resolveLatestTradingDate(todayStr: string): Promise<string> {
   return todayStr;
 }
 
-/** 找到指定日期之前最近一个有选股宝数据的交易日 */
-async function findPrevXGBDate(dateStr: string): Promise<string | null> {
+/** 找到指定日期之前最近一个交易日（优先同花顺日历，回退跳周末探测） */
+async function findPrevTradingDay(dateStr: string): Promise<string | null> {
+  const days = await fetchTradingDays();
+  if (days) {
+    const prev = [...days].reverse().find((d) => d < dateStr);
+    if (prev) return prev;
+  }
   const d = new Date(`${dateStr}T12:00:00`);
   d.setDate(d.getDate() - 1);
   for (let i = 0; i < 12; i++) {
     if (d.getDay() !== 0 && d.getDay() !== 6) {
-      const ds = toDateStr(d);
-      try {
-        const res = await fetch(`/api/xgb?date=${ds}`);
-        const json = await res.json();
-        if (json.data && json.data.length > 0) return ds;
-      } catch {
-        // 继续
-      }
+      return toDateStr(d);
     }
     d.setDate(d.getDate() - 1);
   }
   return null;
+}
+
+/** 拉取选股宝某日涨停列表（失败返回空数组） */
+async function fetchXGBPool(date: string | null): Promise<XGBStock[]> {
+  if (!date) return [];
+  try {
+    const res = await fetch(`/api/xgb?date=${date}`);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function toDateStr(d: Date): string {

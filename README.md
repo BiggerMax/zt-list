@@ -47,6 +47,25 @@ Copy the returned `id` into `wrangler.toml` under `[[kv_namespaces]]` (replace t
 - **Past dates**: the API first returns the persisted snapshot if present; otherwise it rebuilds the day's closing data from East Money historical endpoints and caches it in KV for next time.
 - **Local dev** (no KV binding): falls back to in-memory storage, so history only lasts for the current process.
 
+### Data Sources (同花顺官方 API 为主源)
+
+主要数据已迁移至同花顺金融数据 API（官方、稳定，文档见 https://fuyao.aicubes.cn ）：
+
+| 路由 | 主源 | 兜底 |
+|---|---|---|
+| `/api/pool` 涨停/跌停池 | 同花顺 `limit-up-pool` / `limit-down-pool`（含涨停原因） | 东财 push2ex |
+| `/api/calendar` 交易日历 | 同花顺 `calendar/trading-days`（精确含节假日） | - |
+| `/api/quote` 断板股涨幅 | 同花顺批量快照 / 历史日K | 开盘啦 → 东财 |
+| `/api/xgb` 选股宝快照 | 选股宝（仅断板识别辅助，后续可下线） | - |
+| `/api/stock-chart` 分时/K线 | 开盘啦 → 东财 → 腾讯（同花顺无分钟级数据） | - |
+
+API Key 通过环境变量注入，默认值仅用于本地开发：
+
+```bash
+npx wrangler pages secret put FUYAO_API_KEY   # 生产环境
+# 本地：在 .dev.vars 中写入 FUYAO_API_KEY=sk-fuyao-xxx
+```
+
 ### Local Development
 ```bash
 npm install
