@@ -78,6 +78,49 @@ const SOURCE_LABELS: Record<string, string> = {
   kpl: '开盘啦',
 };
 
+// 涨停题材标签 → 同花顺概念板块标准名映射。
+// 涨停原因（limit_up_reason）是“题材标签 + 拼接串”，不是板块名；
+// 这里把常见题材关键词规整为同花顺板块名，用于“热门板块·涨停家数”排名。
+const REASON_TO_SECTOR: Record<string, string> = {
+  人工智能: '人工智能',
+  算力: '算力',
+  'AI医疗': 'AI医疗',
+  'AI': '人工智能',
+  机器人: '机器人',
+  低空经济: '低空经济',
+  'mRNA': 'mRNA概念',
+  LNP: 'LNP递送',
+  聚乙二醇: '牛股概念',
+  GLP: 'GLP-1概念',
+  创新药: '创新药',
+  中药: '中药',
+  黄金: '黄金珠宝',
+  珠宝: '黄金珠宝',
+  白酒: '白酒概念',
+  新能源车: '新能源车',
+  半导体: '半导体',
+  芯片: '芯片',
+  华为: '华为鸿蒙',
+  鸿蒙: '华为鸿蒙',
+  回购: '回购概念',
+  零售: '零售',
+  国企改革: '国企改革',
+  年报: '年报增长',
+  中报: '中报预增',
+  基因测序: '基因测序',
+  三代测序: '基因测序',
+  药品: '药品获批',
+  高端制造: '高端制造',
+  液态: '液态包装装备',
+};
+
+// 任一涨停题材标签 → 同花顺板块名；匹配不到则原样保留
+function toSectorName(tag: string): string {
+  const t = tag.trim();
+  if (!t) return '';
+  return REASON_TO_SECTOR[t] ?? t;
+}
+
 export default function Home() {
   const [data, setData] = useState<BoardData>({
     board1: [],
@@ -98,6 +141,8 @@ export default function Home() {
   const [isStale, setIsStale] = useState(false); // 实时拉取失败、返回缓存快照
   const [fetchError, setFetchError] = useState(false);
   const [indices, setIndices] = useState<IndexQuote[]>([]);
+  // 热门板块：同花顺真实板块成分股 ∩ 当日涨停池的涨停家数排名
+  const [hotSectors, setHotSectors] = useState<{ thscode: string; name: string; limitUpCount: number }[]>([]);
   const [theme, setTheme] = useState<Theme>('dark');
   const [selectedStock, setSelectedStock] = useState<{ code: string; name: string } | null>(null);
   const [highlightCode, setHighlightCode] = useState<string | null>(null); // 从K线双击跳转后高亮的个股
@@ -289,6 +334,24 @@ export default function Home() {
       setIsStale(false);
       setFetchError(false);
       setLastUpdated(new Date().toLocaleTimeString());
+      // 热门板块：同花顺真实板块涨停家数（非关键路径，失败/无数据不影响看板）
+      const sectorDate = jsonData.date || date;
+      if (sectorDate) {
+        try {
+          const res = await fetch(`/api/hot-sectors?date=${sectorDate}`);
+          if (res.ok) {
+            const j = await res.json();
+            if (Array.isArray(j.sectors)) {
+              const list = (j.sectors as { thscode: string; name: string; limitUpCount: number }[])
+                .filter((s) => s.limitUpCount > 0)
+                .sort((a, b) => b.limitUpCount - a.limitUpCount);
+              setHotSectors(list);
+            }
+          }
+        } catch {
+          /* 忽略：热门板块拉取失败不影响看板 */
+        }
+      }
     } catch (error) {
       if (seq !== fetchSeq.current) return;
       console.error(error);
@@ -458,21 +521,31 @@ export default function Home() {
 
   const allEmpty = BOARD_KEYS.every((k) => data[k].length === 0);
 
-  // 涨停股按板块（reason）统计，取涨停家数前三的板块
+  // 热门板块：优先用同花顺真实板块（成分股 ∩ 当日涨停池）的涨停家数取前三；
+  // 兜底：用涨停原因（题材标签+拼接串）拆分成板块名近似统计
   const topSectors = useMemo(() => {
+    if (hotSectors.length > 0) {
+      return hotSectors
+        .slice(0, 3)
+        .map((s) => ({ name: s.name, count: s.limitUpCount }));
+    }
     const counts = new Map<string, number>();
     for (const bk of BOARD_KEYS) {
       for (const s of data[bk]) {
         if (s.isZhaBan) continue; // 只统计涨停股
-        const r = s.reason.trim();
-        if (r) counts.set(r, (counts.get(r) ?? 0) + 1);
+        const tags = (s.reason ?? '').split('+'); // 同花顺涨停原因用 + 分隔题材标签
+        for (const tag of tags) {
+          const name = toSectorName(tag).trim();
+          if (!name) continue;
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+        }
       }
     }
     return [...counts.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([name, count]) => ({ name, count }));
-  }, [data]);
+  }, [data, hotSectors]);
 
   // 跳转日期后，等数据渲染完成再滚动到高亮个股（重试几次，处理加载延迟）
   useEffect(() => {

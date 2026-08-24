@@ -161,7 +161,10 @@ export async function fetchLimitUpData(options: FetchOptions = {}): Promise<Boar
     }
   }
 
-  // 4. 获取涨停原因：选股宝富文本优先
+  // 4. 获取涨停原因：同花顺个股异动解读（仅当日）优先；历史/解读缺失时兜底用同花顺涨停原因标签
+  const thsReasonMap = isToday
+    ? await fetchThsReasonMap(codes, dateStr)
+    : {};
   const reasonMap = buildReasonMap(xgbRows);
   const prevReasonMap = buildReasonMap(prevPool);
 
@@ -169,10 +172,19 @@ export async function fetchLimitUpData(options: FetchOptions = {}): Promise<Boar
   const todayCodes = new Set(pool.map((s) => s.c));
   const detailedStocks = pool.map((stock) => {
     const detail = detailMap[stock.c];
+    const thsDetail = thsReasonMap[stock.c];
     return {
       ...stock,
       bigOrderNet: detail?.bigOrderNet ?? 0,
-      detailedReason: reasonMap[stock.c] ?? prevReasonMap[stock.c] ?? detail?.concept ?? '',
+      // 详细涨停原因：同花顺异动解读优先，其次同花顺涨停原因标签（limit_up_reason）；
+      // 均无则退回选股宝富文本（仅做最后兜底，保证历史数据不空）
+      detailedReason:
+        thsDetail ||
+        stock.hybk ||
+        reasonMap[stock.c] ||
+        prevReasonMap[stock.c] ||
+        detail?.concept ||
+        '',
       overHigh250: detail?.overHigh250 === true,
     };
   });
@@ -296,6 +308,19 @@ async function fetchXGBPool(date: string | null): Promise<XGBStock[]> {
     return json.data ?? [];
   } catch {
     return [];
+  }
+}
+
+/** 拉取同花顺个股异动解读（详细涨停原因，仅当日有效；失败返回空映射） */
+async function fetchThsReasonMap(codes: string[], date: string): Promise<Record<string, string>> {
+  if (!codes.length) return {};
+  try {
+    const res = await fetch(`/api/ths-reason?codes=${codes.join(',')}&date=${date}`);
+    if (!res.ok) return {};
+    const json = await res.json();
+    return json.reasons ?? {};
+  } catch {
+    return {};
   }
 }
 
